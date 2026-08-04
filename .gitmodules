@@ -1,0 +1,30 @@
+[submodule "external/HOV-SG"]
+	path = external/HOV-SG
+	url = https://github.com/hovsg/HOV-SG.git
+[submodule "external/Metric3D"]
+	path = external/Metric3D
+	url = https://github.com/YvanYin/Metric3D.git
+[submodule "external/OneFormer"]
+	path = external/OneFormer
+	url = https://github.com/SHI-Labs/OneFormer.git
+[submodule "external/OpenScene"]
+	path = external/OpenScene
+	url = https://github.com/pengsongyou/openscene.git
+[submodule "external/dn-splatter"]
+	path = external/dn-splatter
+	url = https://github.com/maturk/dn-splatter.git
+[submodule "external/nerfstudio"]
+	path = external/nerfstudio
+	url = https://github.com/nerfstudio-project/nerfstudio.git
+[submodule "external/openai-clip"]
+	path = external/openai-clip
+	url = https://github.com/openai/CLIP.git
+[submodule "external/openseg-tpu"]
+	path = external/openseg-tpu
+	url = https://github.com/tensorflow/tpu.git
+[submodule "external/pytorch3d"]
+	path = external/pytorch3d
+	url = https://github.com/facebookresearch/pytorch3d.git
+[submodule "external/superpoint-transformer"]
+	path = external/superpoint-transformer
+	url = https://github.com/drprojects/superpoint_transformer.git
