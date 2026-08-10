@@ -76,9 +76,7 @@ All formal results for this run are rooted at:
 ## Data Preparation
 ### ASE
 ```bash
-python data_prep/ase_transfer_single.py \
-  --source ../layout_reconstruction/data/aria_ase/14240 \
-  --dest-root data/aria_ase/14240
+
 ```
 
 ## Pipeline
@@ -95,7 +93,7 @@ bash scripts/verify_skeleton.sh
 
 Freeze and audit the r04 front-view input without reading the adjacent pose
 file:
-
+/home/xinyuan/houselayout3d-repro/raw_data/aria_ase_train_random10_chunks_seed42/raw/45063
 ```bash
 conda run -p /tmp/tmp_data/miniconda3/envs/houselayout3d-layout \
   houselayout3d prepare-input configs/r04_front.yaml --run-id r04-front-v1

@@ -8,6 +8,7 @@ dist/
 
 data/
 weights/
+raw_data/
 
 autorun.md
 
