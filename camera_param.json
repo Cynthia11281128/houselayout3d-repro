@@ -1,0 +1,31 @@
+{
+  "pinhole_intrinsics": [
+    463.99945,
+    463.25045,
+    400.0,
+    300.0
+  ],
+  "pinhole_resolution": [
+    800,
+    600
+  ],
+  "camera_model": "fisheye_double_sphere",
+  "fisheye_intrinsics": {
+    "model": "double_sphere",
+    "focal_length": [
+      190.0,
+      142.5
+    ],
+    "principal_point_offset": [
+      400.0,
+      300.0
+    ],
+    "principal_point_default": "image_center",
+    "xi": -0.27000001072883606,
+    "alpha": 0.5699999928474426,
+    "resolution": [
+      800,
+      600
+    ]
+  }
+}

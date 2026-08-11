@@ -9,6 +9,6 @@ dist/
 data/
 weights/
 raw_data/
-
-autorun.md
+pretrained_weights
+external
 
