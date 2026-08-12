@@ -10,6 +10,16 @@ def main() -> int:
         "  python src/rgb_to_mesh/mesh.py --dn-splatter DN_SPLATTER "
         "--output OUTPUT"
     )
+    print(
+        "  python src/layout_skeleton/oneformer.py --images IMAGES "
+        "--mesh-manifest MESH_MANIFEST --model-dir MODEL_DIR --output OUTPUT"
+    )
+    print(
+        "  python src/layout_skeleton/skeleton.py --transforms TRANSFORMS "
+        "--dn-splatter DN_SPLATTER --mesh-manifest MESH_MANIFEST "
+        "--oneformer ONEFORMER --ns-render NS_RENDER "
+        "--superpoint-repo SUPERPOINT_REPO --output OUTPUT"
+    )
     return 0
 
 

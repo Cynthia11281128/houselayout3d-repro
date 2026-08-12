@@ -1,0 +1,17 @@
+routes:
+  - name: inti-root
+    preflight: true
+    transfer_strategy: auto
+    server:
+      host: inti
+      port: 22
+      username: xinyuan
+      password: ""
+      remote_base_dir: /home/xinyuan/projects/houselayout3d-repro
+    vps:
+      host: 191.222.218.118
+      port: 22
+      username: root
+      password: ""
+      relay_base_dir: /tmp/houselayout3-repro
+    local_base_dir: /home/cynthia/ori/houselayout3d-repro
