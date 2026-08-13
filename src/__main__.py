@@ -12,13 +12,25 @@ def main() -> int:
     )
     print(
         "  python src/layout_skeleton/oneformer.py --images IMAGES "
-        "--model-dir MODEL_DIR --output OUTPUT"
+        "--mesh-manifest MESH_MANIFEST --model-dir MODEL_DIR --output OUTPUT"
     )
     print(
         "  python src/layout_skeleton/skeleton.py --transforms TRANSFORMS "
-        "--dn-splatter DN_SPLATTER --mesh MESH "
+        "--dn-splatter DN_SPLATTER --mesh-manifest MESH_MANIFEST "
         "--oneformer ONEFORMER --ns-render NS_RENDER "
         "--superpoint-repo SUPERPOINT_REPO --output OUTPUT"
+    )
+    print(
+        "  python src/layout_prototype/polygon_init.py --skeleton SKELETON "
+        "--output OUTPUT"
+    )
+    print(
+        "  python src/layout_prototype/prototype.py prepare --skeleton SKELETON "
+        "--polygon-init POLYGON_INIT --source-repo SOURCE --output OUTPUT"
+    )
+    print(
+        "  python src/layout_prototype/prototype.py fit --prepared PROTOTYPE "
+        "--source-repo SOURCE"
     )
     return 0
 
