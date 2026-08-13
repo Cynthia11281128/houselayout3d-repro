@@ -6,7 +6,7 @@ __pycache__/
 build/
 dist/
 
-data/
+/data
 weights/
 raw_data/
 pretrained_weights

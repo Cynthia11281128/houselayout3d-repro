@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -58,6 +59,15 @@ def _write_status(output_dir: Path, state: str, detail: str = "") -> None:
     )
 
 
+def _remove_existing_output(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        raise MeshError(f"cannot overwrite unsupported output path: {path}")
+
+
 def build_training_environment(
     executable: Path, base_environment: dict[str, str] | None = None
 ) -> dict[str, str]:
@@ -77,9 +87,60 @@ def build_training_environment(
 
 
 def _torch_home_for_checkpoint(path: Path) -> Path:
-    if path.parent.name == "checkpoints" and path.parent.parent.name == "hub":
-        return path.parent.parent.parent
-    return path.parent
+    checkpoint = path.expanduser().resolve()
+    if (
+        checkpoint.parent.name == "checkpoints"
+        and checkpoint.parent.parent.name == "hub"
+    ):
+        return checkpoint.parent.parent.parent
+    return checkpoint.parent
+
+
+def _manifest_component_root(manifest: dict[str, Any]) -> Path | None:
+    dataset_root = manifest.get("dataset", {}).get("root")
+    if dataset_root:
+        path = Path(dataset_root).expanduser()
+        if path.name == "dataset":
+            return path.parent
+
+    training_root = manifest.get("outputs", {}).get("training_root")
+    if training_root:
+        path = Path(training_root).expanduser()
+        current = path
+        while current != current.parent:
+            if current.name == "training":
+                return current.parent
+            current = current.parent
+    return None
+
+
+def _relocate_manifest_path(
+    value: str | os.PathLike[str],
+    old_component_root: Path | None,
+    component_dir: Path,
+) -> Path:
+    path = Path(value).expanduser()
+    candidates = [path]
+
+    if old_component_root is not None:
+        try:
+            candidates.append(component_dir / path.relative_to(old_component_root))
+        except ValueError:
+            pass
+
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if part == component_dir.name:
+            candidates.append(component_dir.joinpath(*parts[index + 1 :]))
+
+    if not path.is_absolute():
+        candidates.append(Path.cwd() / path)
+        candidates.append(component_dir / path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[-1]
 
 
 def _verify_dn_splatter(dn_splatter_dir: Path) -> tuple[Path, Path, dict[str, Any]]:
@@ -89,15 +150,177 @@ def _verify_dn_splatter(dn_splatter_dir: Path) -> tuple[Path, Path, dict[str, An
     manifest = _read_json(manifest_path)
     if manifest.get("status") != "complete":
         raise MeshError("dn_splatter manifest is not complete")
-    config_path = Path(manifest["outputs"]["training_config"])
-    checkpoint_path = Path(manifest["outputs"]["final_checkpoint"])
+    old_component_root = _manifest_component_root(manifest)
+    config_path = _relocate_manifest_path(
+        manifest["outputs"]["training_config"],
+        old_component_root,
+        dn_splatter_dir,
+    )
+    checkpoint_path = _relocate_manifest_path(
+        manifest["outputs"]["final_checkpoint"],
+        old_component_root,
+        dn_splatter_dir,
+    )
     if not config_path.is_file() or not checkpoint_path.is_file():
-        raise MeshError("DN-Splatter config or checkpoint is missing")
+        raise MeshError(
+            "DN-Splatter config or checkpoint is missing: "
+            f"{config_path}, {checkpoint_path}"
+        )
     if _sha256(config_path) != manifest["outputs"]["training_config_sha256"]:
         raise MeshError("DN-Splatter training config hash no longer matches")
     if _sha256(checkpoint_path) != manifest["outputs"]["final_checkpoint_sha256"]:
         raise MeshError("DN-Splatter checkpoint hash no longer matches")
     return config_path, checkpoint_path, manifest
+
+
+def _parse_yaml_path_block(lines: list[str]) -> Path | None:
+    parts: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            return None
+        parts.append(stripped[2:].strip("'\""))
+    if not parts:
+        return None
+    if parts[0] == os.sep:
+        return Path(os.sep, *parts[1:])
+    return Path(*parts)
+
+
+def _format_yaml_path_lines(path: Path, indentation: str) -> list[str]:
+    return [f"{indentation}- {part}\n" for part in path.parts]
+
+
+def _rewrite_yaml_posix_paths(
+    text: str,
+    old_component_root: Path | None,
+    component_dir: Path,
+    runtime_dataset_dir: Path,
+) -> str:
+    old_dataset_root = (
+        old_component_root / "dataset" if old_component_root is not None else None
+    )
+    component_training_dir = component_dir / "training"
+    old_training_dir = (
+        old_component_root / "training" if old_component_root is not None else None
+    )
+
+    def relocate(path: Path) -> Path:
+        if not path.is_absolute():
+            return path
+        if old_dataset_root is not None:
+            try:
+                path.relative_to(old_dataset_root)
+                return runtime_dataset_dir
+            except ValueError:
+                pass
+        if old_training_dir is not None:
+            try:
+                return component_training_dir / path.relative_to(old_training_dir)
+            except ValueError:
+                pass
+        return _relocate_manifest_path(path, old_component_root, component_dir)
+
+    source_lines = text.splitlines(keepends=True)
+    output_lines: list[str] = []
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
+        output_lines.append(line)
+        if "!!python/object/apply:pathlib.PosixPath" not in line:
+            index += 1
+            continue
+
+        index += 1
+        path_lines: list[str] = []
+        while index < len(source_lines) and source_lines[index].lstrip().startswith("- "):
+            path_lines.append(source_lines[index])
+            index += 1
+
+        parsed = _parse_yaml_path_block(path_lines)
+        if parsed is None:
+            output_lines.extend(path_lines)
+            continue
+
+        indentation = path_lines[0][: len(path_lines[0]) - len(path_lines[0].lstrip())]
+        output_lines.extend(_format_yaml_path_lines(relocate(parsed), indentation))
+    return "".join(output_lines)
+
+
+def _resolve_input_dir(
+    manifest: dict[str, Any],
+    key: str,
+    fallback: Path,
+    old_component_root: Path | None,
+    component_dir: Path,
+) -> Path:
+    raw = manifest.get("inputs", {}).get(key)
+    if raw is not None:
+        relocated = _relocate_manifest_path(raw, old_component_root, component_dir)
+        if relocated.is_dir():
+            return relocated
+    if fallback.is_dir():
+        return fallback.resolve()
+    raise MeshError(f"DN-Splatter {key} directory is missing: {raw or fallback}")
+
+
+def _symlink(source: Path, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise MeshError(f"runtime dataset path already exists: {destination}")
+    os.symlink(source, destination, target_is_directory=source.is_dir())
+
+
+def _prepare_runtime_training_config(
+    training_config: Path,
+    dn_splatter_dir: Path,
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> Path:
+    old_component_root = _manifest_component_root(manifest)
+    runtime_dir = output_dir / "runtime"
+    runtime_dataset_dir = runtime_dir / "dataset"
+    runtime_dir.mkdir(parents=True, exist_ok=False)
+    runtime_dataset_dir.mkdir()
+
+    source_dataset_dir = _relocate_manifest_path(
+        manifest.get("dataset", {}).get("root", dn_splatter_dir / "dataset"),
+        old_component_root,
+        dn_splatter_dir,
+    )
+    if not source_dataset_dir.is_dir():
+        raise MeshError(f"DN-Splatter dataset is missing: {source_dataset_dir}")
+
+    image_dir = _resolve_input_dir(
+        manifest,
+        "images",
+        dn_splatter_dir.parent / "images",
+        old_component_root,
+        dn_splatter_dir,
+    )
+    depth_dir = _resolve_input_dir(
+        manifest,
+        "depth",
+        dn_splatter_dir.parent / "metric3d" / "depth",
+        old_component_root,
+        dn_splatter_dir,
+    )
+    _symlink(image_dir, runtime_dataset_dir / "images")
+    _symlink(depth_dir, runtime_dataset_dir / "mono_depth")
+
+    for name in ("transforms.json", "seed_pointcloud.ply", "seed_pointcloud.json"):
+        source = source_dataset_dir / name
+        if source.is_file():
+            _symlink(source, runtime_dataset_dir / name)
+
+    runtime_config = runtime_dir / "config.yml"
+    rewritten = _rewrite_yaml_posix_paths(
+        training_config.read_text(encoding="utf-8"),
+        old_component_root,
+        dn_splatter_dir,
+        runtime_dataset_dir,
+    )
+    runtime_config.write_text(rewritten, encoding="utf-8")
+    return runtime_config
 
 
 def build_mesh_command(training_config: Path, export_dir: Path) -> list[str]:
@@ -190,20 +413,35 @@ def run_mesh(
     dn_splatter_dir: Path,
     output_dir: Path,
     command: list[str] | None = None,
+    overwrite: bool = False,
 ) -> Path:
     dn_splatter_dir = dn_splatter_dir.expanduser().resolve()
-    output_dir = output_dir.expanduser()
+    output_dir = output_dir.expanduser().resolve()
     if output_dir.exists():
-        raise MeshError(f"mesh output already exists and will not be overwritten: {output_dir}")
-    training_config, checkpoint_path, dn_manifest = _verify_dn_splatter(dn_splatter_dir)
-    if not LPIPS_ALEXNET_CHECKPOINT.is_file():
-        raise MeshError(f"LPIPS checkpoint is missing: {LPIPS_ALEXNET_CHECKPOINT}")
-    if not DN_SPLATTER_REPOSITORY.is_dir():
-        raise MeshError(f"DN-Splatter repository is missing: {DN_SPLATTER_REPOSITORY}")
+        if not overwrite:
+            raise MeshError(
+                f"mesh output already exists and will not be overwritten: {output_dir}"
+            )
+        _remove_existing_output(output_dir)
+    training_config, checkpoint_path, dn_manifest = _verify_dn_splatter(
+        dn_splatter_dir
+    )
+    lpips_checkpoint = LPIPS_ALEXNET_CHECKPOINT.expanduser().resolve()
+    if not lpips_checkpoint.is_file():
+        raise MeshError(f"LPIPS checkpoint is missing: {lpips_checkpoint}")
+    dn_splatter_repository = DN_SPLATTER_REPOSITORY.expanduser().resolve()
+    if not dn_splatter_repository.is_dir():
+        raise MeshError(f"DN-Splatter repository is missing: {dn_splatter_repository}")
 
     export_dir = output_dir / "export"
     export_dir.mkdir(parents=True, exist_ok=False)
-    mesh_command = build_mesh_command(training_config, export_dir)
+    runtime_training_config = _prepare_runtime_training_config(
+        training_config,
+        dn_splatter_dir,
+        output_dir,
+        dn_manifest,
+    )
+    mesh_command = build_mesh_command(runtime_training_config, export_dir)
     gs_mesh = Path(mesh_command[0])
     if not gs_mesh.is_file() or not os.access(gs_mesh, os.X_OK):
         raise MeshError(f"gs-mesh is unavailable: {gs_mesh}")
@@ -213,7 +451,7 @@ def run_mesh(
     start = time.perf_counter()
     _write_status(output_dir, "exporting", str(log_path))
     environment = build_training_environment(gs_mesh)
-    environment["TORCH_HOME"] = str(_torch_home_for_checkpoint(LPIPS_ALEXNET_CHECKPOINT))
+    environment["TORCH_HOME"] = str(_torch_home_for_checkpoint(lpips_checkpoint))
 
     try:
         with log_path.open("w", encoding="utf-8") as log:
@@ -221,7 +459,7 @@ def run_mesh(
             log.flush()
             result = subprocess.run(
                 mesh_command,
-                cwd=DN_SPLATTER_REPOSITORY,
+                cwd=dn_splatter_repository,
                 env=environment,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -249,6 +487,7 @@ def run_mesh(
                 "dn_splatter": str(dn_splatter_dir),
                 "dn_splatter_manifest_sha256": _sha256(dn_splatter_dir / "manifest.json"),
                 "training_config": str(training_config),
+                "runtime_training_config": str(runtime_training_config),
                 "checkpoint": str(checkpoint_path),
                 "checkpoint_sha256": dn_manifest["outputs"]["final_checkpoint_sha256"],
             },
@@ -295,11 +534,17 @@ def main() -> int:
     )
     parser.add_argument("--dn-splatter", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove an existing mesh output path before running.",
+    )
     args = parser.parse_args()
     path = run_mesh(
         dn_splatter_dir=args.dn_splatter,
         output_dir=args.output,
         command=sys.argv,
+        overwrite=args.overwrite,
     )
     print(path)
     return 0

@@ -15,6 +15,7 @@ import math
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -23,6 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+SCRIPT_DIRECTORY = Path(__file__).resolve().parent
+sys.path = [
+    entry
+    for entry in sys.path
+    if not entry or Path(entry).resolve() != SCRIPT_DIRECTORY
+]
 
 LPIPS_ALEXNET_CHECKPOINT = Path(
     "pretrained_weights/alexnet-owt-7be5be79.pth"
@@ -96,7 +104,7 @@ class DNSplatterConfig:
 
 
 def _component_dir(config: DNSplatterConfig) -> Path:
-    return config.storage.output
+    return config.storage.output.expanduser().resolve()
 
 
 def load_camera_parameters(path: Path = CAMERA_PARAMETERS) -> CameraConfig:
@@ -152,11 +160,11 @@ def build_config_from_args(args: argparse.Namespace) -> DNSplatterConfig:
             camera=camera,
         ),
         storage=StorageConfig(
-            lpips_alexnet_checkpoint=LPIPS_ALEXNET_CHECKPOINT.expanduser(),
-            output=args.output.expanduser(),
+            lpips_alexnet_checkpoint=LPIPS_ALEXNET_CHECKPOINT.expanduser().resolve(),
+            output=args.output.expanduser().resolve(),
         ),
         metric3d=Metric3DConfig(
-            repository=METRIC3D_REPOSITORY.expanduser(),
+            repository=METRIC3D_REPOSITORY.expanduser().resolve(),
         ),
         dn_splatter=DNSplatterSettings(
             method=method,
@@ -202,6 +210,15 @@ def _write_status(component_dir: Path, state: str, detail: str = "") -> None:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+
+
+def _remove_existing_output(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        raise DNSplatterError(f"cannot overwrite unsupported output path: {path}")
 
 
 def build_training_environment(
@@ -513,6 +530,7 @@ def prepare_dn_splatter(
     image_dir: Path,
     depth_dir: Path,
     command: list[str] | None = None,
+    overwrite: bool = False,
 ) -> Path:
     """Prepare and validate a known-pose DN-Splatter dataset."""
 
@@ -529,9 +547,11 @@ def prepare_dn_splatter(
     image_names = _image_names_from_transforms(transforms)
     component_dir = _component_dir(config)
     if component_dir.exists():
-        raise DNSplatterError(
-            f"DN-Splatter component already exists and will not be overwritten: {component_dir}"
-        )
+        if not overwrite:
+            raise DNSplatterError(
+                f"DN-Splatter component already exists and will not be overwritten: {component_dir}"
+            )
+        _remove_existing_output(component_dir)
     dataset_dir = component_dir / "dataset"
     dataset_dir.mkdir(parents=True, exist_ok=False)
     started_at = datetime.now(timezone.utc)
@@ -778,6 +798,7 @@ def run_dn_splatter(
     image_dir: Path,
     depth_dir: Path,
     command: list[str] | None = None,
+    overwrite: bool = False,
 ) -> Path:
     """Prepare and train DN-Splatter in one direct run."""
 
@@ -787,6 +808,7 @@ def run_dn_splatter(
         image_dir=image_dir,
         depth_dir=depth_dir,
         command=command,
+        overwrite=overwrite,
     )
     return train_dn_splatter(config, command=command)
 
@@ -817,6 +839,11 @@ def main() -> int:
     parser.add_argument("--seed-voxel-size-meters", type=float, default=0.03)
     parser.add_argument("--maximum-seed-points", type=int, default=500000)
     parser.add_argument("--random-seed", type=int, default=0)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove an existing DN-Splatter output path before running.",
+    )
     args = parser.parse_args()
     path = run_dn_splatter(
         build_config_from_args(args),
@@ -824,6 +851,7 @@ def main() -> int:
         image_dir=args.images,
         depth_dir=args.depth,
         command=sys.argv,
+        overwrite=args.overwrite,
     )
     print(path)
     return 0

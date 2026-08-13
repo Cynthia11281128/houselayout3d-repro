@@ -9,12 +9,34 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     __package__ = "src.layout_skeleton"
 
+"""
+Run: 
+
+ROOT=/home/xinyuan/projects/houselayout3d-repro/data/insta360/r04
+NS_RENDER=/home/xinyuan/miniconda3/envs/nerfstudio/bin/ns-render
+SUPERPOINR_REPO=/home/xinyuan/projects/houselayout3d-repro/external/superpoint-transformer
+
+conda run -n nerfstudio python src/layout_skeleton/skeleton.py \
+    --transforms ${ROOT}/dn_splatter/dataset/transforms.json \
+    --dn-splatter ${ROOT}/dn_splatter \
+    --mesh ${ROOT}/mesh/export/DepthAndNormalMapsPoisson_poisson_mesh.ply \
+    --oneformer ${ROOT}/oneformer \
+    --camera camera_param.json \
+    --ns-render ${NS_RENDER} \
+    --superpoint-repo ${SUPERPOINR_REPO} \
+    --output ${ROOT}/skeleton \
+    --preferred-gpu 1 \
+    --overwrite \
+    --reuse-rendered-depth
+"""
+
 import argparse
 import gzip
 import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -62,7 +84,7 @@ class SuperpointConfig:
 class SkeletonConfig:
     transforms: Path
     dn_splatter: Path
-    mesh_manifest: Path
+    mesh: Path
     oneformer: Path
     camera: CameraConfig
     ns_render: Path
@@ -72,6 +94,8 @@ class SkeletonConfig:
     samples_per_frame: int = 5000
     preferred_gpu: int = 0
     torch_home: Path | None = None
+    overwrite: bool = False
+    reuse_rendered_depth: bool = False
 
 
 def _sha256(path: Path) -> str:
@@ -103,6 +127,54 @@ def _write_status(component_dir: Path, state: str, detail: str = "") -> None:
     log_path = component_dir / "skeleton.log"
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"{datetime.now(timezone.utc).isoformat()} {state} {detail}\n")
+
+
+def _preserve_rendered_depth(output: Path) -> Path | None:
+    render_dir = output / "rendered_depth"
+    if not render_dir.is_dir():
+        return None
+    preserved = output.parent / f".{output.name}.rendered_depth.{os.getpid()}"
+    if preserved.exists():
+        raise SkeletonError(f"temporary rendered-depth cache already exists: {preserved}")
+    shutil.move(str(render_dir), str(preserved))
+    return preserved
+
+
+def _progress(iterable: Any, total: int | None, desc: str, unit: str) -> Any:
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        return iterable
+    return tqdm(iterable, total=total, desc=desc, unit=unit, dynamic_ncols=True, disable=False)
+
+
+def _run_live_logged_command(
+    command: list[str],
+    cwd: Path,
+    environment: dict[str, str],
+    log_path: Path,
+) -> int:
+    with log_path.open("wb") as log:
+        log.write(("command: " + " ".join(command) + "\n\n").encode("utf-8"))
+        log.flush()
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        assert process.stdout is not None
+        for chunk in iter(lambda: process.stdout.read(4096), b""):
+            log.write(chunk)
+            log.flush()
+            try:
+                sys.stdout.buffer.write(chunk)
+            except AttributeError:
+                sys.stdout.write(chunk.decode("utf-8", errors="replace"))
+            sys.stdout.flush()
+        return process.wait()
 
 
 def load_camera(path: Path) -> CameraConfig:
@@ -153,6 +225,113 @@ def _component_manifest(path_or_dir: Path, name: str) -> Path:
     if not path.is_file():
         raise SkeletonError(f"{name} manifest is missing: {path}")
     return path
+
+
+def _parse_yaml_path_block(lines: list[str]) -> Path | None:
+    parts: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            return None
+        parts.append(stripped[2:].strip("'\""))
+    if not parts:
+        return None
+    if parts[0] == os.sep:
+        return Path(os.sep, *parts[1:])
+    return Path(*parts)
+
+
+def _format_yaml_path_lines(path: Path, indentation: str) -> list[str]:
+    return [f"{indentation}- {part}\n" for part in path.parts]
+
+
+def _rewrite_runtime_config_paths(
+    text: str,
+    dn_splatter_dir: Path,
+    runtime_dataset_dir: Path,
+) -> str:
+    def relocate(path: Path) -> Path:
+        if not path.is_absolute():
+            return path
+        parts = path.parts
+        for index, part in enumerate(parts):
+            if part != dn_splatter_dir.name:
+                continue
+            suffix = parts[index + 1 :]
+            if suffix and suffix[0] == "dataset":
+                return runtime_dataset_dir
+            if suffix and suffix[0] == "training":
+                return dn_splatter_dir.joinpath(*suffix)
+        return path
+
+    source_lines = text.splitlines(keepends=True)
+    output_lines: list[str] = []
+    index = 0
+    while index < len(source_lines):
+        line = source_lines[index]
+        output_lines.append(line)
+        if "!!python/object/apply:pathlib.PosixPath" not in line:
+            index += 1
+            continue
+
+        index += 1
+        path_lines: list[str] = []
+        while index < len(source_lines) and source_lines[index].lstrip().startswith("- "):
+            path_lines.append(source_lines[index])
+            index += 1
+
+        parsed = _parse_yaml_path_block(path_lines)
+        if parsed is None:
+            output_lines.extend(path_lines)
+            continue
+
+        indentation = path_lines[0][: len(path_lines[0]) - len(path_lines[0].lstrip())]
+        output_lines.extend(_format_yaml_path_lines(relocate(parsed), indentation))
+    return "".join(output_lines)
+
+
+def _symlink_runtime_path(source: Path, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise SkeletonError(f"runtime dataset path already exists: {destination}")
+    os.symlink(source.resolve(), destination, target_is_directory=source.is_dir())
+
+
+def _prepare_runtime_training_config(
+    training_config: Path,
+    dn_splatter_dir: Path,
+    output_dir: Path,
+) -> Path:
+    scene_root = dn_splatter_dir.parent
+    source_dataset_dir = dn_splatter_dir / "dataset"
+    image_dir = scene_root / "images"
+    depth_dir = scene_root / "metric3d" / "depth"
+    if not source_dataset_dir.is_dir():
+        raise SkeletonError(f"DN-Splatter dataset is missing: {source_dataset_dir}")
+    if not image_dir.is_dir():
+        raise SkeletonError(f"image directory is missing: {image_dir}")
+    if not depth_dir.is_dir():
+        raise SkeletonError(f"Metric3D depth directory is missing: {depth_dir}")
+
+    runtime_dir = output_dir / "runtime"
+    runtime_dataset_dir = runtime_dir / "dataset"
+    runtime_dir.mkdir(parents=True, exist_ok=False)
+    runtime_dataset_dir.mkdir()
+
+    _symlink_runtime_path(image_dir, runtime_dataset_dir / "images")
+    _symlink_runtime_path(depth_dir, runtime_dataset_dir / "mono_depth")
+    for name in ("transforms.json", "seed_pointcloud.ply", "seed_pointcloud.json"):
+        source = source_dataset_dir / name
+        if source.is_file():
+            _symlink_runtime_path(source, runtime_dataset_dir / name)
+
+    runtime_config = runtime_dir / "config.yml"
+    rewritten = _rewrite_runtime_config_paths(
+        training_config.read_text(encoding="utf-8"),
+        dn_splatter_dir,
+        runtime_dataset_dir,
+    )
+    runtime_config.write_text(rewritten, encoding="utf-8")
+    return runtime_config
 
 
 def build_depth_render_command(ns_render: Path, training_config: Path, output_dir: Path) -> list[str]:
@@ -219,14 +398,9 @@ def _load_inputs(config: SkeletonConfig) -> dict[str, Any]:
     if not checkpoint.is_file() or _sha256(checkpoint) != dn_manifest["outputs"]["final_checkpoint_sha256"]:
         raise SkeletonError(f"dn_splatter checkpoint hash mismatch: {checkpoint}")
 
-    mesh_manifest_path = _component_manifest(config.mesh_manifest, "mesh")
-    mesh_manifest = _read_json(mesh_manifest_path)
-    if mesh_manifest.get("status") != "complete":
-        raise SkeletonError("mesh manifest is not complete")
-    mesh_record = mesh_manifest["outputs"]["poisson_mesh"]
-    mesh_path = _resolve_component_artifact(mesh_manifest_path, mesh_record["path"], "mesh")
-    if not mesh_path.is_file() or _sha256(mesh_path) != mesh_record["sha256"]:
-        raise SkeletonError(f"mesh Poisson hash mismatch: {mesh_path}")
+    mesh_path = config.mesh.expanduser().resolve()
+    if not mesh_path.is_file():
+        raise SkeletonError(f"mesh is missing: {mesh_path}")
 
     oneformer_manifest_path = _component_manifest(config.oneformer, "oneformer")
     oneformer_manifest = _read_json(oneformer_manifest_path)
@@ -252,15 +426,31 @@ def _load_inputs(config: SkeletonConfig) -> dict[str, Any]:
     frame_names = [Path(frame["file_path"]).name for frame in frames]
     semantic_names = [record["name"] for record in semantic_records]
     if frame_names != semantic_names:
-        raise SkeletonError("transforms and OneFormer frame orders do not match")
+        if len(set(frame_names)) != len(frame_names):
+            raise SkeletonError("transforms contains duplicate frame names")
+        semantic_by_name: dict[str, dict[str, Any]] = {}
+        for record in semantic_records:
+            name = record["name"]
+            if name in semantic_by_name:
+                raise SkeletonError(f"OneFormer contains duplicate frame name: {name}")
+            semantic_by_name[name] = record
+        frame_name_set = set(frame_names)
+        missing = [name for name in frame_names if name not in semantic_by_name]
+        extra = [name for name in semantic_names if name not in frame_name_set]
+        if missing or extra:
+            raise SkeletonError(
+                "transforms and OneFormer frames do not match: "
+                f"missing={len(missing)} extra={len(extra)}"
+            )
+        semantic_records = [semantic_by_name[name] for name in frame_names]
 
     return {
         "transforms_path": transforms_path,
         "transforms": transforms,
         "dn_manifest_path": dn_manifest_path,
+        "dn_manifest": dn_manifest,
         "training_config": training_config,
         "checkpoint": checkpoint,
-        "mesh_manifest_path": mesh_manifest_path,
         "mesh_path": mesh_path,
         "oneformer_manifest_path": oneformer_manifest_path,
         "semantic_records": semantic_records,
@@ -275,7 +465,7 @@ def _load_rendered_depths(
     raw_dir = render_dir / "train" / "raw-depth"
     paths: list[Path] = []
     records: list[dict[str, Any]] = []
-    for frame in frames:
+    for frame in _progress(frames, total=len(frames), desc="validating_depth", unit="frame"):
         stem = Path(frame["file_path"]).stem
         path = raw_dir / f"{stem}.npy.gz"
         if not path.is_file():
@@ -331,7 +521,13 @@ def _sample_rays(
     validity: list[np.ndarray] = []
     pixel_records: list[np.ndarray] = []
     per_frame: list[dict[str, Any]] = []
-    for index, (frame, semantic_record, depth_path) in enumerate(zip(frames, semantic_records, depth_paths)):
+    iterator = enumerate(zip(frames, semantic_records, depth_paths))
+    for index, (frame, semantic_record, depth_path) in _progress(
+        iterator,
+        total=len(frames),
+        desc="sampling_rays",
+        unit="frame",
+    ):
         with gzip.open(depth_path, "rb") as handle:
             depth = np.asarray(np.load(handle)).squeeze().astype(np.float32)
         with Image.open(semantic_record["layout_path"]) as image:
@@ -414,7 +610,8 @@ def _paper_vertex_votes(
     counts = np.zeros((len(vertices), len(LAYOUT_LABELS)), dtype=np.uint32)
     distances: list[np.ndarray] = []
     chunk_size = 250_000
-    for start in range(0, len(points), chunk_size):
+    starts = range(0, len(points), chunk_size)
+    for start in _progress(starts, total=len(starts), desc="paper_vertex_voting", unit="chunk"):
         stop = min(start + chunk_size, len(points))
         distance, vertex_index = tree.query(points[start:stop], k=1, workers=-1)
         np.add.at(counts, (vertex_index, labels[start:stop]), 1)
@@ -433,7 +630,8 @@ def _source_knn_probabilities(
     tree = cKDTree(points)
     probabilities = np.empty((len(vertices), len(LAYOUT_LABELS)), dtype=np.float32)
     chunk_size = 50_000
-    for start in range(0, len(vertices), chunk_size):
+    starts = range(0, len(vertices), chunk_size)
+    for start in _progress(starts, total=len(starts), desc="source_knn_transfer", unit="chunk"):
         stop = min(start + chunk_size, len(vertices))
         _, indices = tree.query(vertices[start:stop], k=k, workers=-1)
         neighbor_labels = labels[indices]
@@ -451,8 +649,32 @@ def _superpoint_hierarchy(
     repository = config.superpoint.repository.expanduser().resolve()
     if not repository.is_dir():
         raise SkeletonError(f"Superpoint Transformer repository is missing: {repository}")
-    if str(repository) not in sys.path:
-        sys.path.insert(0, str(repository))
+    cut_pursuit_python = repository / "src" / "dependencies" / "parallel_cut_pursuit" / "python"
+    superpoint_paths = [
+        repository,
+        cut_pursuit_python / "wrappers",
+        cut_pursuit_python / "bin",
+    ]
+    resolved_superpoint_paths = {path.resolve() for path in superpoint_paths}
+    sys.path = [
+        entry
+        for entry in sys.path
+        if Path(entry or ".").resolve() not in resolved_superpoint_paths
+    ]
+    for path in reversed(superpoint_paths):
+        sys.path.insert(0, str(path))
+    for name, module in list(sys.modules.items()):
+        if name == "src" or name.startswith("src."):
+            module_path = getattr(module, "__file__", None)
+            in_repository = False
+            if module_path is not None:
+                try:
+                    Path(module_path).resolve().relative_to(repository)
+                    in_repository = True
+                except ValueError:
+                    in_repository = False
+            if not in_repository:
+                del sys.modules[name]
     try:
         import torch
         from src.data import Data
@@ -461,7 +683,7 @@ def _superpoint_hierarchy(
         from src.transforms.partition import CutPursuitPartition
         from src.transforms.point import GroundElevation, PointFeatures
     except ImportError as error:
-        raise SkeletonError("Superpoint Transformer dependencies are unavailable") from error
+        raise SkeletonError(f"Superpoint Transformer dependencies are unavailable: {error}") from error
     if not torch.cuda.is_available():
         raise SkeletonError("Superpoint preprocessing requires CUDA")
 
@@ -519,7 +741,12 @@ def _superpoint_hierarchy(
     spt_dir.mkdir(exist_ok=False)
     segmentations: list[np.ndarray] = []
     segment_counts: list[int] = []
-    for level in range(1, hierarchy.num_levels):
+    for level in _progress(
+        range(1, hierarchy.num_levels),
+        total=hierarchy.num_levels - 1,
+        desc="superpoints_export",
+        unit="level",
+    ):
         segmentation = hierarchy.get_super_index(level, low=0).cpu().numpy()
         if len(segmentation) != len(vertices) or segmentation.min() != 0:
             raise SkeletonError("invalid SPT hierarchy index array")
@@ -543,7 +770,13 @@ def _aggregate_superpoint_labels(
     level_records: list[dict[str, Any]] = []
     final_labels: np.ndarray | None = None
     final_probabilities: np.ndarray | None = None
-    for level, segmentation in enumerate(segmentations, start=1):
+    iterator = enumerate(segmentations, start=1)
+    for level, segmentation in _progress(
+        iterator,
+        total=len(segmentations),
+        desc="aggregating_superpoint_votes",
+        unit="level",
+    ):
         segment_count = int(segmentation.max()) + 1
         segment_votes = np.zeros((segment_count, len(LAYOUT_LABELS)), dtype=np.uint64)
         np.add.at(segment_votes, segmentation, vote_counts)
@@ -620,7 +853,7 @@ def _write_semantic_meshes(
         "stairs": "stair_mesh.ply",
         "inaccurate": "geometrically_inaccurate_mesh.ply",
     }
-    for name, keep in groups.items():
+    for name, keep in _progress(groups.items(), total=len(groups), desc="writing_filtered_meshes", unit="mesh"):
         filtered = o3d.geometry.TriangleMesh(mesh)
         filtered.remove_vertices_by_mask(~keep)
         if len(filtered.vertices) == 0:
@@ -677,46 +910,76 @@ def _write_ray_visualizations(component_dir: Path, rays: dict[str, Any]) -> dict
 def run_skeleton(config: SkeletonConfig, command: list[str] | None = None) -> Path:
     """Render raw depths, vote semantics onto the mesh, and extract skeleton subsets."""
 
-    output = config.output.expanduser()
+    output = config.output.expanduser().resolve()
+    preserved_render_dir: Path | None = None
     if output.exists():
-        raise SkeletonError(f"skeleton output already exists: {output}")
+        if not config.overwrite:
+            raise SkeletonError(f"skeleton output already exists: {output}")
+        if output.is_symlink() or output.is_file():
+            output.unlink()
+        elif output.is_dir():
+            if config.reuse_rendered_depth:
+                preserved_render_dir = _preserve_rendered_depth(output)
+            shutil.rmtree(output)
+        else:
+            raise SkeletonError(f"cannot overwrite unsupported output path: {output}")
     inputs = _load_inputs(config)
     output.mkdir(parents=True, exist_ok=False)
+    if preserved_render_dir is not None:
+        shutil.move(str(preserved_render_dir), str(output / "rendered_depth"))
     started_at = datetime.now(timezone.utc)
     start = time.perf_counter()
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", str(config.preferred_gpu))
 
+    runtime_training_config = _prepare_runtime_training_config(
+        inputs["training_config"],
+        config.dn_splatter.expanduser().resolve(),
+        output,
+    )
     render_dir = output / "rendered_depth"
-    render_command = build_depth_render_command(config.ns_render.expanduser().resolve(), inputs["training_config"], render_dir)
+    render_command = build_depth_render_command(config.ns_render.expanduser().resolve(), runtime_training_config, render_dir)
     _write_json(output / "commands.json", {"render_depth": render_command})
-    _write_status(output, "rendering_depth", "DN-Splatter raw-depth")
     if not config.ns_render.is_file() or not os.access(config.ns_render, os.X_OK):
         raise SkeletonError(f"ns-render is unavailable: {config.ns_render}")
 
     try:
-        environment = build_training_environment(config.ns_render.expanduser().resolve())
-        if config.torch_home is not None:
-            environment["TORCH_HOME"] = str(config.torch_home.expanduser().resolve())
-        render_cwd = Path("external/dn-splatter")
-        if not render_cwd.is_dir():
-            render_cwd = config.ns_render.expanduser().resolve().parent
-        with (output / "render_depth.log").open("w", encoding="utf-8") as log:
-            log.write("command: " + " ".join(render_command) + "\n\n")
-            log.flush()
-            result = subprocess.run(
-                render_command,
-                cwd=render_cwd,
-                env=environment,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-        if result.returncode != 0:
-            raise SkeletonError(f"DN-Splatter depth rendering failed with code {result.returncode}; see {output / 'render_depth.log'}")
-
         frames = inputs["transforms"]["frames"]
         expected_shape = (config.camera.height, config.camera.width)
-        _write_status(output, "validating_depth", f"frames={len(frames)}")
-        depth_paths, depth_records = _load_rendered_depths(render_dir, frames, expected_shape)
+        reused_rendered_depth = False
+        depth_paths: list[Path] | None = None
+        depth_records: list[dict[str, Any]] | None = None
+
+        if config.reuse_rendered_depth and render_dir.is_dir():
+            _write_status(output, "validating_reused_depth", f"frames={len(frames)}")
+            try:
+                depth_paths, depth_records = _load_rendered_depths(render_dir, frames, expected_shape)
+                reused_rendered_depth = True
+                render_return_code = 0
+            except Exception as error:
+                _write_status(output, "discarding_reused_depth", str(error))
+                shutil.rmtree(render_dir)
+                depth_paths = None
+                depth_records = None
+
+        if depth_paths is None or depth_records is None:
+            _write_status(output, "rendering_depth", "DN-Splatter raw-depth")
+            environment = build_training_environment(config.ns_render.expanduser().resolve())
+            if config.torch_home is not None:
+                environment["TORCH_HOME"] = str(config.torch_home.expanduser().resolve())
+            render_cwd = Path("external/dn-splatter")
+            if not render_cwd.is_dir():
+                render_cwd = config.ns_render.expanduser().resolve().parent
+            render_return_code = _run_live_logged_command(
+                render_command,
+                render_cwd,
+                environment,
+                output / "render_depth.log",
+            )
+            if render_return_code != 0:
+                raise SkeletonError(f"DN-Splatter depth rendering failed with code {render_return_code}; see {output / 'render_depth.log'}")
+            _write_status(output, "validating_depth", f"frames={len(frames)}")
+            depth_paths, depth_records = _load_rendered_depths(render_dir, frames, expected_shape)
+
         if len(depth_paths) != len(inputs["semantic_records"]):
             raise SkeletonError("rendered-depth and semantic frame counts differ")
 
@@ -751,7 +1014,7 @@ def run_skeleton(config: SkeletonConfig, command: list[str] | None = None) -> Pa
 
         segmentations, segment_counts = _superpoint_hierarchy(config, vertices, colors, output)
         _write_status(output, "aggregating_superpoint_votes", f"levels={len(segmentations)}")
-        hard_labels, vertex_probabilities, level_records = superpoint_aggregate_superpoint_labels(
+        hard_labels, vertex_probabilities, level_records = _aggregate_superpoint_labels(
             output, segmentations, vertex_votes, knn_probabilities
         )
         np.save(output / "vertex_probabilities.npy", vertex_probabilities.astype(np.float16))
@@ -796,11 +1059,15 @@ def run_skeleton(config: SkeletonConfig, command: list[str] | None = None) -> Pa
             "inputs": {
                 "transforms": {"path": str(inputs["transforms_path"]), "sha256": _sha256(inputs["transforms_path"])},
                 "dn_splatter_manifest": {"path": str(inputs["dn_manifest_path"]), "sha256": _sha256(inputs["dn_manifest_path"])},
-                "mesh_manifest": {"path": str(inputs["mesh_manifest_path"]), "sha256": _sha256(inputs["mesh_manifest_path"])},
+                "dn_splatter_training_config": {"path": str(inputs["training_config"]), "sha256": _sha256(inputs["training_config"])},
+                "runtime_training_config": {"path": str(runtime_training_config), "sha256": _sha256(runtime_training_config)},
+                "mesh": {"path": str(inputs["mesh_path"]), "sha256": _sha256(inputs["mesh_path"])},
                 "oneformer_manifest": {"path": str(inputs["oneformer_manifest_path"]), "sha256": _sha256(inputs["oneformer_manifest_path"])},
             },
             "algorithm": {
                 "depth": "DN-Splatter final-checkpoint rendered raw-depth in meters",
+                "reuse_rendered_depth_requested": config.reuse_rendered_depth,
+                "reused_rendered_depth": reused_rendered_depth,
                 "samples_per_frame": config.samples_per_frame,
                 "sampling": "uniform without replacement over all image pixels",
                 "pixel_center_offset": 0.5,
@@ -849,7 +1116,9 @@ def run_skeleton(config: SkeletonConfig, command: list[str] | None = None) -> Pa
                 },
             },
             "validation": {
-                "render_return_code": result.returncode,
+                "render_return_code": render_return_code,
+                "reuse_rendered_depth_requested": config.reuse_rendered_depth,
+                "reused_rendered_depth": reused_rendered_depth,
                 "one_depth_per_frame": len(depth_paths) == len(frames),
                 "one_semantic_map_per_frame": len(inputs["semantic_records"]) == len(frames),
                 "exact_paper_sample_count": len(rays["valid"]) == len(frames) * config.samples_per_frame,
@@ -894,12 +1163,18 @@ def main() -> int:
     )
     parser.add_argument("--transforms", type=Path, required=True)
     parser.add_argument("--dn-splatter", type=Path, required=True)
-    parser.add_argument("--mesh-manifest", type=Path, required=True)
+    parser.add_argument("--mesh", type=Path, required=True)
     parser.add_argument("--oneformer", type=Path, required=True)
     parser.add_argument("--camera", type=Path, default=Path("camera_param.json"))
     parser.add_argument("--ns-render", type=Path, required=True)
     parser.add_argument("--superpoint-repo", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--reuse-rendered-depth",
+        action="store_true",
+        help="Preserve and reuse output/rendered_depth when --overwrite is used, after validating frame names and depth shapes.",
+    )
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--samples-per-frame", type=int, default=5000)
     parser.add_argument("--preferred-gpu", type=int, default=0)
@@ -936,7 +1211,7 @@ def main() -> int:
     config = SkeletonConfig(
         transforms=args.transforms,
         dn_splatter=args.dn_splatter,
-        mesh_manifest=args.mesh_manifest,
+        mesh=args.mesh,
         oneformer=args.oneformer,
         camera=load_camera(args.camera),
         ns_render=args.ns_render,
@@ -946,6 +1221,8 @@ def main() -> int:
         samples_per_frame=args.samples_per_frame,
         preferred_gpu=args.preferred_gpu,
         torch_home=args.torch_home,
+        overwrite=args.overwrite,
+        reuse_rendered_depth=args.reuse_rendered_depth,
     )
     manifest = run_skeleton(config, command=sys.argv)
     print(manifest)

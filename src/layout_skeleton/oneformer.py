@@ -189,7 +189,7 @@ def run_oneformer(
     output_dir: Path,
     camera: CameraConfig,
     model_dir: Path,
-    mesh_manifest: Path,
+    mesh_manifest: Path | None = None,
     image_list: Path | None = None,
     task: str = "semantic",
     preview_count: int = 12,
@@ -201,11 +201,11 @@ def run_oneformer(
     images = images.expanduser().resolve()
     output_dir = output_dir.expanduser()
     model_dir = model_dir.expanduser().resolve()
-    mesh_manifest = mesh_manifest.expanduser().resolve()
+    mesh_manifest = mesh_manifest.expanduser().resolve() if mesh_manifest is not None else None
     if output_dir.exists():
         raise OneFormerError(f"OneFormer output already exists: {output_dir}")
     records = _scan_images(images, image_list.expanduser().resolve() if image_list else None)
-    mesh = _mesh_record(mesh_manifest)
+    mesh = _mesh_record(mesh_manifest) if mesh_manifest is not None else None
     model_files = _verify_model_files(model_dir)
 
     coco_dir = output_dir / "coco_id"
@@ -233,6 +233,10 @@ def run_oneformer(
     if not torch.cuda.is_available():
         _write_status(output_dir, "failed", "CUDA is unavailable")
         raise OneFormerError("OneFormer requires CUDA")
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        tqdm = None
 
     random.seed(random_seed)
     np.random.seed(random_seed)
@@ -245,8 +249,15 @@ def run_oneformer(
     labels_path = output_dir / "labels.json"
 
     try:
-        image_processor = OneFormerImageProcessor.from_pretrained(
-            model_dir, local_files_only=True, repo_path=str(model_dir)
+        processor_config = _read_json(model_dir / "preprocessor_config.json")
+        processor_config.pop("image_processor_type", None)
+        processor_config.pop("metadata", None)
+        if "_max_size" in processor_config and "max_size" not in processor_config:
+            processor_config["max_size"] = processor_config.pop("_max_size")
+        processor_config.setdefault("class_info_file", "coco_panoptic.json")
+        processor_config["repo_path"] = str(model_dir)
+        image_processor = OneFormerImageProcessor(
+            **processor_config,
         )
         tokenizer = CLIPTokenizer.from_pretrained(model_dir, local_files_only=True)
         processor = OneFormerProcessor(image_processor=image_processor, tokenizer=tokenizer)
@@ -268,7 +279,10 @@ def run_oneformer(
         _write_status(output_dir, "inferencing", f"0/{len(records)}")
         with log_path.open("w", encoding="utf-8") as log, per_image_path.open("w", encoding="utf-8") as handle:
             log.write(f"model_dir: {model_dir}\nframes: {len(records)}\n")
-            for index, source in enumerate(records):
+            iterator = enumerate(records)
+            if tqdm is not None:
+                iterator = tqdm(iterator, total=len(records), desc="OneFormer", unit="frame")
+            for index, source in iterator:
                 path = Path(source["path"])
                 if _sha256(path) != source["sha256"]:
                     raise OneFormerError(f"input image hash changed: {path}")
@@ -331,8 +345,6 @@ def run_oneformer(
             "random_seed": random_seed,
             "inputs": {
                 "images": records,
-                "mesh_manifest": {"path": str(mesh_manifest), "sha256": _sha256(mesh_manifest)},
-                "poisson_mesh": mesh,
                 "model_files": model_files,
             },
             "algorithm": {
@@ -378,6 +390,9 @@ def run_oneformer(
             },
             "warnings": [],
         }
+        if mesh_manifest is not None:
+            manifest["inputs"]["mesh_manifest"] = {"path": str(mesh_manifest), "sha256": _sha256(mesh_manifest)}
+            manifest["inputs"]["poisson_mesh"] = mesh
         manifest_path = output_dir / "manifest.json"
         _write_json(manifest_path, manifest)
         _write_status(output_dir, "complete", str(manifest_path))
@@ -396,7 +411,7 @@ def main() -> int:
     )
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--image-list", type=Path)
-    parser.add_argument("--mesh-manifest", type=Path, required=True)
+    parser.add_argument("--mesh-manifest", type=Path)
     parser.add_argument("--camera", type=Path, default=Path("camera_param.json"))
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -422,4 +437,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

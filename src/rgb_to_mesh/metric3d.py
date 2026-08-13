@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from tqdm import tqdm
 
 
 METRIC3D_REPOSITORY = Path("external/Metric3D")
@@ -74,6 +77,15 @@ def _write_status(output_dir: Path, state: str, detail: str = "") -> None:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
     )
+
+
+def _remove_existing_output(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        raise Metric3DError(f"cannot overwrite unsupported output path: {path}")
 
 
 def load_camera_parameters(path: Path = CAMERA_PARAMETERS) -> CameraConfig:
@@ -290,6 +302,7 @@ def run_metric3d(
     output_dir: Path,
     image_glob: str,
     command: list[str] | None = None,
+    overwrite: bool = False,
 ) -> Path:
     image_dir = image_dir.expanduser().resolve()
     output_dir = output_dir.expanduser()
@@ -299,9 +312,11 @@ def run_metric3d(
     if not image_paths:
         raise Metric3DError(f"no images match {image_glob}: {image_dir}")
     if output_dir.exists():
-        raise Metric3DError(
-            f"Metric3D output already exists and will not be overwritten: {output_dir}"
-        )
+        if not overwrite:
+            raise Metric3DError(
+                f"Metric3D output already exists and will not be overwritten: {output_dir}"
+            )
+        _remove_existing_output(output_dir)
     depth_dir = output_dir / "depth"
     geometry_dir = output_dir / "geometry"
     preview_dir = output_dir / "previews"
@@ -329,8 +344,15 @@ def run_metric3d(
         )
         _write_status(output_dir, "running", f"0/{len(image_paths)}")
 
+        progress = tqdm(
+            image_paths,
+            desc="Metric3D",
+            unit="image",
+            dynamic_ncols=True,
+        )
         with records_path.open("w", encoding="utf-8") as record_file:
-            for index, image_path in enumerate(image_paths):
+            for index, image_path in enumerate(progress):
+                progress.set_postfix_str(image_path.name, refresh=False)
                 image_start = time.perf_counter()
                 arrays, resize_scale, padding, depth_scale = _run_one(
                     model, torch, functional, np, cv2, camera, image_path
@@ -491,12 +513,18 @@ def main() -> int:
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--image-glob", default="*.png")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove an existing output path before running.",
+    )
     args = parser.parse_args()
     path = run_metric3d(
         image_dir=args.images,
         output_dir=args.output,
         image_glob=args.image_glob,
         command=sys.argv,
+        overwrite=args.overwrite,
     )
     print(path)
     return 0
