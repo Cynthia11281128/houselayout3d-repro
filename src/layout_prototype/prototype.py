@@ -695,25 +695,94 @@ def fit_prototype(config: FitConfig) -> Path:
     return manifest_path
 
 
-def main() -> int:
+def _default_root() -> Path:
+    return Path(os.environ.get("ROOT", "data/insta360/r04"))
+
+
+def _default_python() -> Path:
+    return Path(os.environ.get("PROTOTYPE_PYTHON", sys.executable))
+
+
+def _add_prepare_arguments(parser: argparse.ArgumentParser, *, required: bool) -> None:
+    root = _default_root()
+    parser.add_argument("--skeleton", type=Path, default=root / "skeleton", required=required)
+    parser.add_argument("--polygon-init", type=Path, default=root / "polygon_init", required=required)
+    parser.add_argument("--source-repo", type=Path, default=Path("MultiFloor3D-unofficial"), required=required)
+    parser.add_argument("--output", type=Path, default=root / "prototype", required=required)
+    parser.add_argument("--python", type=Path, default=_default_python())
+    parser.add_argument("--random-seed", type=int, default=0)
+    parser.add_argument("--scene-type", default="matterport")
+    parser.add_argument("--iterations", type=int, default=4000)
+    parser.add_argument("--checkpoint-interval", type=int, default=100)
+    parser.add_argument("--object-target-triangles", type=int, default=200_000)
+    parser.add_argument("--strict-source-hashes", action="store_true")
+    parser.add_argument("--skip-runtime-probe", action="store_true")
+
+
+def _prepare_config_from_args(args: argparse.Namespace) -> PrepareConfig:
+    if args.scene_type != "matterport":
+        raise PrototypeError("--scene-type must be matterport for the Z-up source configuration")
+    if min(args.iterations, args.checkpoint_interval, args.object_target_triangles) <= 0:
+        raise PrototypeError("iteration, checkpoint, and object triangle counts must be positive")
+    return PrepareConfig(
+        skeleton=args.skeleton,
+        polygon_init=args.polygon_init,
+        source_repo=args.source_repo,
+        output=args.output,
+        python=args.python,
+        random_seed=args.random_seed,
+        scene_type=args.scene_type,
+        iterations=args.iterations,
+        checkpoint_interval=args.checkpoint_interval,
+        object_target_triangles=args.object_target_triangles,
+        strict_source_hashes=args.strict_source_hashes,
+        skip_runtime_probe=args.skip_runtime_probe,
+    )
+
+
+def _run_direct(argv: list[str] | None) -> int:
     parser = argparse.ArgumentParser(
-        description="Prepare or fit the Section 4.3 prototype component.",
+        description="Prepare and fit the Section 4.3 prototype component.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_prepare_arguments(parser, required=False)
+    parser.add_argument("--preferred-gpu", type=int, default=0)
+    args = parser.parse_args(argv)
+    component_dir = args.output.expanduser().resolve()
+    prepared_manifest = component_dir / "prepare_manifest.json"
+    complete_manifest = component_dir / "manifest.json"
+    if complete_manifest.is_file() and _read_json(complete_manifest).get("status") == "complete":
+        raise PrototypeError("prototype fitting is already complete")
+    if not prepared_manifest.is_file():
+        print(prepare_prototype(_prepare_config_from_args(args)))
+    print(
+        fit_prototype(
+            FitConfig(
+                prepared=args.output,
+                source_repo=args.source_repo,
+                python=args.python,
+                preferred_gpu=args.preferred_gpu,
+            )
+        )
+    )
+    return 0
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in {"prepare", "fit"}:
+        return _run_direct(argv)
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prepare or fit the Section 4.3 prototype component. Omit the subcommand "
+            "to run prepare followed by fit."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare = subparsers.add_parser("prepare")
-    prepare.add_argument("--skeleton", type=Path, required=True)
-    prepare.add_argument("--polygon-init", type=Path, required=True)
-    prepare.add_argument("--source-repo", type=Path, required=True)
-    prepare.add_argument("--output", type=Path, required=True)
-    prepare.add_argument("--python", type=Path, default=Path(sys.executable))
-    prepare.add_argument("--random-seed", type=int, default=0)
-    prepare.add_argument("--scene-type", default="matterport")
-    prepare.add_argument("--iterations", type=int, default=4000)
-    prepare.add_argument("--checkpoint-interval", type=int, default=100)
-    prepare.add_argument("--object-target-triangles", type=int, default=200_000)
-    prepare.add_argument("--strict-source-hashes", action="store_true")
-    prepare.add_argument("--skip-runtime-probe", action="store_true")
+    _add_prepare_arguments(prepare, required=True)
 
     fit = subparsers.add_parser("fit")
     fit.add_argument("--prepared", type=Path, required=True)
@@ -724,26 +793,7 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.command == "prepare":
-        if args.scene_type != "matterport":
-            raise PrototypeError("--scene-type must be matterport for the Z-up source configuration")
-        if min(args.iterations, args.checkpoint_interval, args.object_target_triangles) <= 0:
-            raise PrototypeError("iteration, checkpoint, and object triangle counts must be positive")
-        path = prepare_prototype(
-            PrepareConfig(
-                skeleton=args.skeleton,
-                polygon_init=args.polygon_init,
-                source_repo=args.source_repo,
-                output=args.output,
-                python=args.python,
-                random_seed=args.random_seed,
-                scene_type=args.scene_type,
-                iterations=args.iterations,
-                checkpoint_interval=args.checkpoint_interval,
-                object_target_triangles=args.object_target_triangles,
-                strict_source_hashes=args.strict_source_hashes,
-                skip_runtime_probe=args.skip_runtime_probe,
-            )
-        )
+        path = prepare_prototype(_prepare_config_from_args(args))
     else:
         if args.output is not None and args.output.expanduser().resolve() != args.prepared.expanduser().resolve():
             raise PrototypeError("--output must match --prepared for fit")

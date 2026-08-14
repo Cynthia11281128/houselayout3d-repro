@@ -55,18 +55,13 @@ conda run --no-capture-output -n houselayout3d-layout python src/layout_prototyp
     --rdp-epsilon-meters 0.03 \
     --output ${ROOT}/polygon_init
 
-conda run --no-capture-output -n houselayout3d-layout python src/layout_prototype/prototype.py prepare \
-    --skeleton ${ROOT}/skeleton \
-    --polygon-init ${ROOT}/polygon_init \
-    --source-repo MultiFloor3D-unofficial \
-    --python /path/to/prototype/python \
-    --output ${ROOT}/prototype
-
-conda run --no-capture-output -n houselayout3d-layout python src/layout_prototype/prototype.py fit \
-    --prepared ${ROOT}/prototype \
-    --source-repo MultiFloor3D-unofficial \
-    --python /path/to/prototype/python \
-    --preferred-gpu 0
+conda run --no-capture-output -n houselayout3d-layout python src/layout_prototype/prototype.py \
+      --skeleton ${ROOT}/skeleton \
+      --polygon-init ${ROOT}/polygon_init \
+      --source-repo MultiFloor3D-unofficial \
+      --python /path/to/prototype/python \
+      --output ${ROOT}/prototype \
+      --preferred-gpu 1
 ```
 
 **Minimum Input Data Required**
