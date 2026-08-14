@@ -1,4 +1,5 @@
 from sklearn.neighbors import NearestNeighbors
+import colorsys
 import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,11 @@ from merge_split_util import get_closest_edges_to_point_sq_dist
 import point_triangle_distance_vectorized
 from polygon_fitting_config import PolygonFittingConfig
 from point_triangle_distance_vectorized import find_k_closest_triangles
+
+
+def stable_plane_color(plane_id: int) -> np.ndarray:
+    hue = (int(plane_id) * 0.6180339887498949) % 1.0
+    return np.asarray(colorsys.hsv_to_rgb(hue, 0.72, 0.95), dtype=np.float64)
 
 
 def triangulate_3d_polygon(args):
@@ -1414,6 +1420,8 @@ class PolygonSet3D(nn.Module):
 
         # duplicate vertices for each polygon so we get per-face colored mesh
         for polygon in np.unique(triangle_polygons):
+            if polygon < 0:
+                continue
             if classes is not None and self.polygon_classes is not None and not torch.isin(self.polygon_classes[polygon], classes):
                 continue
             mask = triangle_polygons == polygon
@@ -1425,7 +1433,7 @@ class PolygonSet3D(nn.Module):
             submesh = o3d.geometry.TriangleMesh()
             submesh.vertices = o3d.utility.Vector3dVector(vertices[vertex_subset].astype(np.float64))
             submesh.triangles = o3d.utility.Vector3iVector(triangles_subset.astype(np.int32))
-            submesh.vertex_colors = o3d.utility.Vector3dVector(self.polygon_colors[polygon].unsqueeze(0).detach().cpu().numpy().repeat(len(vertex_subset), axis=0).astype(np.float64))
+            submesh.vertex_colors = o3d.utility.Vector3dVector(np.repeat(stable_plane_color(int(polygon))[None], len(vertex_subset), axis=0))
             mesh += submesh
         mesh.compute_vertex_normals()
         return mesh

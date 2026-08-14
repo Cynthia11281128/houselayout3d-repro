@@ -7,7 +7,7 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    __package__ = "src.layout_prototype"
+    __package__ = "src.prototype_fitting"
 
 import argparse
 import hashlib
@@ -105,6 +105,14 @@ def _verify_record(manifest_path: Path, record: dict[str, Any], name: str, compo
     if not path.is_file() or _sha256(path) != record["sha256"]:
         raise PolygonInitError(f"{name} hash mismatch: {path}")
     return path
+
+
+def _debug_color_from_id(identifier: int) -> np.ndarray:
+    value = ((int(identifier) + 1) * 2_654_435_761) & 0xFFFFFF
+    return np.asarray(
+        [(value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF],
+        dtype=np.float64,
+    ) / 255.0
 
 
 def fit_plane_ransac(
@@ -786,7 +794,6 @@ def run_polygon_init(config: PolygonInitConfig, command: list[str] | None = None
         rectified_mesh.vertices = o3d.utility.Vector3dVector(rectified_vertices)
         rectified_mesh.compute_vertex_normals()
         rectified_record = _mesh_artifact(component_dir / "rectified_mesh.ply", rectified_mesh)
-        clean_edge_record = _mesh_artifact(component_dir / "clean_edge_mesh.ply", rectified_mesh)
 
         same_plane = (
             (plane_assignments[triangles[:, 0]] >= 0)
@@ -799,9 +806,9 @@ def run_polygon_init(config: PolygonInitConfig, command: list[str] | None = None
         )
         component_colors = np.full((len(vertices), 3), 0.35, dtype=np.float64)
         accepted = plane_assignments >= 0
-        for polygon_id, polygon in polygon_info.items():
+        for polygon_id in polygon_info:
             mask = plane_assignments == int(polygon_id)
-            component_colors[mask] = np.asarray(polygon["color"])
+            component_colors[mask] = _debug_color_from_id(int(polygon_id))
         component_mesh.vertex_colors = o3d.utility.Vector3dVector(component_colors)
         component_mesh.compute_vertex_normals()
         component_record = _mesh_artifact(
@@ -890,7 +897,6 @@ def run_polygon_init(config: PolygonInitConfig, command: list[str] | None = None
             },
             "outputs": {
                 "rectified_mesh": rectified_record,
-                "clean_edge_mesh": clean_edge_record,
                 "plane_components_mesh": component_record,
                 "polygon_info": {
                     "path": str(polygon_path),
@@ -977,7 +983,7 @@ def run_polygon_init(config: PolygonInitConfig, command: list[str] | None = None
             },
             "warnings": [
                 "The Appendix specifies Algorithm 1 but does not disclose K, the RANSAC distance threshold, iteration count, or contour simplification tolerance; these are explicit reproducibility parameters in the YAML configuration.",
-                "The supplied unofficial package consumes clean_edge_mesh.ply and polygon_info.json but does not contain the code that creates them; this component independently implements the Appendix algorithm and its observed input schema.",
+                "The supplied unofficial package consumes polygon_info.json but does not contain the code that creates it; this component independently implements the Appendix algorithm and its observed input schema.",
             ],
         }
         if not all(manifest["validation"].values()):

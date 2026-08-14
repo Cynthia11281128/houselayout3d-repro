@@ -21,16 +21,20 @@ def main() -> int:
         "--superpoint-repo SUPERPOINT_REPO --output OUTPUT"
     )
     print(
-        "  python src/layout_prototype/polygon_init.py --skeleton SKELETON "
+        "  python src/prototype_fitting/polygon_init.py --skeleton SKELETON "
         "--output OUTPUT"
     )
     print(
-        "  python src/layout_prototype/prototype.py prepare --skeleton SKELETON "
+        "  python src/prototype_fitting/prototype.py --skeleton SKELETON "
         "--polygon-init POLYGON_INIT --source-repo SOURCE --output OUTPUT"
     )
     print(
-        "  python src/layout_prototype/prototype.py fit --prepared PROTOTYPE "
-        "--source-repo SOURCE"
+        "  python src/scene_graph/graph.py --prototype PROTOTYPE "
+        "--skeleton SKELETON --output OUTPUT"
+    )
+    print(
+        "  python src/layout_export/layout.py --scene-graph SCENE_GRAPH "
+        "--prototype PROTOTYPE --output OUTPUT"
     )
     return 0
 

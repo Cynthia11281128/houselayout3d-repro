@@ -65,21 +65,20 @@ The backup code still depends on the old monolithic `PipelineConfig`. The migrat
 Create a new active package:
 
 ```text
-src/layout_prototype/
+src/prototype_fitting/
   __init__.py
   polygon_init.py
   prototype.py
   prototype_entry.py
 ```
 
-Keep `layout_skeleton` focused on Section 4.2. Keep `layout_prototype` focused on Section 4.3.
+Keep `layout_skeleton` focused on Section 4.2. Keep `prototype_fitting` focused on Section 4.3.
 
 Update `src/__main__.py` to advertise:
 
 ```text
-python src/layout_prototype/polygon_init.py --skeleton SKELETON --output OUTPUT
-python src/layout_prototype/prototype.py prepare --skeleton SKELETON --polygon-init POLYGON_INIT --source-repo SOURCE --output OUTPUT
-python src/layout_prototype/prototype.py fit --prepared PROTOTYPE --source-repo SOURCE --output OUTPUT
+python src/prototype_fitting/polygon_init.py --skeleton SKELETON --output OUTPUT
+python src/prototype_fitting/prototype.py --skeleton SKELETON --polygon-init POLYGON_INIT --source-repo SOURCE --output OUTPUT
 ```
 
 The final CLI can differ, but it should not require repo-global YAML config.
@@ -110,7 +109,7 @@ Required:
 Recommended CLI:
 
 ```bash
-python src/layout_prototype/polygon_init.py \
+python src/prototype_fitting/polygon_init.py \
   --skeleton data/insta360/r04/skeleton \
   --superpoint-level 3 \
   --plane-distance-threshold-meters 0.04 \
@@ -227,25 +226,18 @@ Required:
   - `MultiFloor3D-unofficial/fit_prototype.py`;
   - `MultiFloor3D-unofficial/mesh_fitting_3D/*`.
 
-Recommended two-phase CLI:
+Recommended CLI:
 
 ```bash
-python src/layout_prototype/prototype.py prepare \
+python src/prototype_fitting/prototype.py \
   --skeleton data/insta360/r04/skeleton \
   --polygon-init data/insta360/r04/polygon_init \
-  --source-repo MultiFloor3D-unofficial \
-  --output data/insta360/r04/prototype
-```
-
-```bash
-python src/layout_prototype/prototype.py fit \
-  --prepared data/insta360/r04/prototype \
   --source-repo MultiFloor3D-unofficial \
   --python /path/to/prototype/python \
   --output data/insta360/r04/prototype
 ```
 
-Use a `prepare` phase because the optimizer is long-running and sensitive to dependency/source state. Freezing inputs before execution makes failures auditable.
+The pipeline freezes inputs first, then immediately runs the optimizer.
 
 ### Preparation Algorithm
 
@@ -297,16 +289,14 @@ prototype/
   manifest.json
   prepare_manifest.json
   commands.json
+  command.json
+  fit.log
+  fitted_mesh.ply
+  fitted_mesh_00.ply
+  fitted_mesh_*.ply
+  polygon_set_3d.pt
+  polygon_set_3d_*.pt
   frozen_inputs/
-  attempts/
-    attempt_000/
-      STATUS.json
-      fit.log
-      checkpoints/
-      final_model_state.*
-      final_mesh.ply
-      final_polygons.json
-      diagnostics.json
 ```
 
 If the unofficial optimizer writes different filenames, wrap or adapt outputs so `manifest.json` declares:
@@ -366,7 +356,7 @@ Implementation choices or not fully paper-specified:
 
 ## Implementation Steps
 
-1. Create `src/layout_prototype/__init__.py`.
+1. Create `src/prototype_fitting/__init__.py`.
 2. Migrate pure geometry helpers from `src_backup/polygon_init.py`:
    - `fit_plane_ransac`;
    - `plane_basis`;
@@ -381,9 +371,8 @@ Implementation choices or not fully paper-specified:
    - superpoint/mesh length mismatch failure.
 5. Run `polygon_init` on a small synthetic mesh fixture.
 6. Run `polygon_init` on `r04` after 4.2 skeleton exists.
-7. Create `src/layout_prototype/prototype_entry.py` from backup seeded launcher.
-8. Implement `prototype.py prepare` with explicit inputs and source/runtime audits.
-9. Implement `prototype.py fit` wrapper around `MultiFloor3D-unofficial/fit_prototype.py`.
+7. Create `src/prototype_fitting/prototype_entry.py` from backup seeded launcher.
+8. Implement `prototype.py` with explicit inputs, source/runtime audits, and a direct wrapper around `MultiFloor3D-unofficial/fit_prototype.py`.
 10. Run runtime probe only, then a short debug fit if the unofficial source supports limited iterations.
 11. Run full prototype fitting on `r04`.
 12. Inspect final prototype mesh and polygon state before starting Section 4.4.
@@ -403,7 +392,6 @@ Section 4.3 migration is complete when:
 
 - 4.3 cannot run until 4.2 skeleton is complete.
 - The unofficial optimizer may require a specialized Python environment with CGAL and PyTorch3D.
-- The backup implementation pins source hashes; local source edits will need an explicit decision: update expected hashes or record unpinned source state.
 - Boundary extraction from noisy connected components may produce branchy/non-simple loops; diagnostics should preserve rejected cases.
 - Object mesh can be empty for some scenes; floor-hole projection must handle that without failing the whole prototype stage.
-- Long optimization can fail late, so the prepare/frozen-input phase should be separate from fitting attempts.
+- Long optimization can fail late, so the prepare/frozen-input phase remains separate from fitting.

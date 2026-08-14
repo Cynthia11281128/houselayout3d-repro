@@ -42,11 +42,11 @@ conda run --no-capture-output -n houselayout3d-layout python src/layout_skeleton
       --overwrite
 ```
 
-### polygon-fitting
+### prototype-fittingwoxiwang
 ```bash
 ROOT=data/insta360/r04
 
-conda run --no-capture-output -n houselayout3d-layout python src/layout_prototype/polygon_init.py \
+conda run --no-capture-output -n houselayout3d-layout python src/prototype_fitting/polygon_init.py \
     --skeleton ${ROOT}/skeleton \
     --superpoint-level 3 \
     --plane-distance-threshold-meters 0.04 \
@@ -55,13 +55,33 @@ conda run --no-capture-output -n houselayout3d-layout python src/layout_prototyp
     --rdp-epsilon-meters 0.03 \
     --output ${ROOT}/polygon_init
 
-conda run --no-capture-output -n houselayout3d-layout python src/layout_prototype/prototype.py \
-      --skeleton ${ROOT}/skeleton \
-      --polygon-init ${ROOT}/polygon_init \
-      --source-repo MultiFloor3D-unofficial \
-      --python /path/to/prototype/python \
-      --output ${ROOT}/prototype \
-      --preferred-gpu 1
+conda run --no-capture-output -n houselayout3d-layout python src/prototype_fitting/prototype.py \
+    --skeleton ${ROOT}/skeleton \
+    --polygon-init ${ROOT}/polygon_init \
+    --source-repo MultiFloor3D-unofficial \
+    --python /tmp/tmp_data/miniconda3/envs/houselayout3d-layout/bin/python \
+    --output ${ROOT}/prototype \
+    --preferred-gpu 1
+```
+
+### scene-graph
+```bash
+ROOT=data/insta360/r04
+
+conda run --no-capture-output -n houselayout3d-layout python src/scene_graph/graph.py \
+    --prototype ${ROOT}/prototype \
+    --skeleton ${ROOT}/skeleton \
+    --output ${ROOT}/scene_graph
+```
+
+### layout-export
+```bash
+ROOT=data/insta360/r04
+
+conda run --no-capture-output -n houselayout3d-layout python src/layout_export/layout.py \
+    --scene-graph ${ROOT}/scene_graph \
+    --prototype ${ROOT}/prototype \
+    --output ${ROOT}/layout
 ```
 
 **Minimum Input Data Required**

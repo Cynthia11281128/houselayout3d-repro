@@ -13,7 +13,7 @@ import numpy as np
 def main() -> int:
     if len(sys.argv) < 4 or sys.argv[1] != "--source-script":
         raise SystemExit(
-            "usage: python -m src.layout_prototype.prototype_entry "
+            "usage: python -m src.prototype_fitting.prototype_entry "
             "--source-script PATH --random-seed N [source arguments ...]"
         )
     source_script = Path(sys.argv[2]).resolve()

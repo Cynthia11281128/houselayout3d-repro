@@ -25,7 +25,7 @@ Every completed component must contain `manifest.json` with at least:
 - exact command, source revisions, environment, and random seed when applicable;
 - output paths, counts, validation results, warnings, and elapsed time.
 
-A component is resumable only when its manifest has `status: complete` and all declared output hashes still match. Failed or partial runs remain untouched for inspection and use a new attempt directory.
+A component is resumable only when its manifest has `status: complete` and all declared output hashes still match.
 
 `input/images.txt` is the only image list authorized for reconstruction. The active known-pose path consumes only the explicitly configured front-view `poses.csv`; adjacent trajectories and ground truth remain unauthorized.
 

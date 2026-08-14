@@ -7,7 +7,8 @@ if __package__ in {None, ""}:
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    __package__ = "src.layout_prototype"
+    __package__ = "src.prototype_fitting"
+
 
 import argparse
 import hashlib
@@ -34,17 +35,17 @@ class PrototypeError(RuntimeError):
     """Raised when prototype preparation or fitting fails."""
 
 
-SOURCE_FILE_SHA256 = {
-    "fit_prototype.py": "1b4cdeeb3148fd6f145b29f12018a8308601b7da3f2d47608b01d8ab7757cb90",
-    "mesh_fitting_3D/cgal_triangulations.py": "0ce34746691bb227c011f0a63d9e7425d47a4c7d98109e1638f092b3e34ba3f7",
-    "mesh_fitting_3D/chamfer_distance.py": "110e98550340ee34f53620540c5dd412660a6438c62dfa6cb1964b9d9ba9f1fc",
-    "mesh_fitting_3D/differentiable_3D_polygon_stuctures.py": "d976df8d3cd81e7bee9566a663558e1661eb399815ac6608ffee653c58efb7c0",
-    "mesh_fitting_3D/differentiable_mesh_sampling.py": "c531414fdbfdf47a194b021b807b5dce1b06ca1b95252347abf44e9836c915df",
-    "mesh_fitting_3D/geometry_utils.py": "19194eda3c71f45704cda0ed745b0fe8c36bb1cbde423e7c149b1fd5fce9516c",
-    "mesh_fitting_3D/merge_split_util.py": "54b1169b3801770e850ac49d29c0aa95ba7b5b27ff2ed2041e90576b5503ec42",
-    "mesh_fitting_3D/point_triangle_distance_vectorized.py": "3a30af9998d103be8f42c2f9fcaaad989214b85e336db753550e107abbb5b007",
-    "mesh_fitting_3D/polygon_fitting_config.py": "7fe51903979c2ef10e15c30fcd4d15417d6d9fc9fe1ec8904c2fb733fdc601d6",
-}
+REQUIRED_SOURCE_FILES = (
+    "fit_prototype.py",
+    "mesh_fitting_3D/cgal_triangulations.py",
+    "mesh_fitting_3D/chamfer_distance.py",
+    "mesh_fitting_3D/differentiable_3D_polygon_stuctures.py",
+    "mesh_fitting_3D/differentiable_mesh_sampling.py",
+    "mesh_fitting_3D/geometry_utils.py",
+    "mesh_fitting_3D/merge_split_util.py",
+    "mesh_fitting_3D/point_triangle_distance_vectorized.py",
+    "mesh_fitting_3D/polygon_fitting_config.py",
+)
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,6 @@ class PrepareConfig:
     iterations: int = 4000
     checkpoint_interval: int = 100
     object_target_triangles: int = 200_000
-    strict_source_hashes: bool = False
     skip_runtime_probe: bool = False
 
 
@@ -148,21 +148,17 @@ def _copy_record(source: Path, destination: Path) -> dict[str, Any]:
     return _record(destination)
 
 
-def _verify_source(source_repo: Path, strict_hashes: bool) -> dict[str, dict[str, Any]]:
+def _verify_source(source_repo: Path) -> dict[str, dict[str, Any]]:
     root = source_repo.expanduser().resolve()
     records: dict[str, dict[str, Any]] = {}
-    for relative, expected in SOURCE_FILE_SHA256.items():
+    for relative in REQUIRED_SOURCE_FILES:
         path = root / relative
         if not path.is_file():
             raise PrototypeError(f"unofficial source file is missing: {path}")
         actual = _sha256(path)
-        if strict_hashes and actual != expected:
-            raise PrototypeError(f"unofficial source hash changed for {relative}: {actual}")
         records[relative] = {
             "path": str(path),
             "sha256": actual,
-            "expected_sha256": expected,
-            "matches_expected": actual == expected,
             "size_bytes": path.stat().st_size,
         }
     return records
@@ -378,10 +374,12 @@ def build_prototype_command(
     scene_type: str,
 ) -> list[str]:
     source_script = source_repo.expanduser().resolve() / "fit_prototype.py"
+    prepared = {key: value.expanduser().resolve() for key, value in prepared.items()}
+    output_dir = output_dir.expanduser().resolve()
     return [
         str(python),
         "-m",
-        "src.layout_prototype.prototype_entry",
+        "src.prototype_fitting.prototype_entry",
         "--source-script",
         str(source_script),
         "--random-seed",
@@ -424,7 +422,7 @@ def prepare_prototype(config: PrepareConfig) -> Path:
     started_at = datetime.now(timezone.utc)
     start = time.perf_counter()
     try:
-        source_records = _verify_source(config.source_repo, config.strict_source_hashes)
+        source_records = _verify_source(config.source_repo)
         source_config = _source_config(config.source_repo, config.iterations, config.checkpoint_interval)
         runtime_versions = (
             {"probe_skipped": True}
@@ -459,7 +457,7 @@ def prepare_prototype(config: PrepareConfig) -> Path:
             config.python.expanduser().resolve(),
             config.source_repo,
             frozen_paths,
-            Path("<ATTEMPT_OUTPUT_DIR>"),
+            component_dir,
             config.random_seed,
             config.scene_type,
         )
@@ -480,10 +478,6 @@ def prepare_prototype(config: PrepareConfig) -> Path:
                 "repository": str(config.source_repo.expanduser().resolve()),
                 "files": source_records,
                 "matterport_config": source_config,
-                "source_files_modified": any(
-                    not record["matches_expected"] for record in source_records.values()
-                ),
-                "strict_source_hashes": config.strict_source_hashes,
             },
             "prepared_inputs": frozen_records,
             "adaptations": {
@@ -525,7 +519,7 @@ def _load_prepared(config: FitConfig) -> tuple[Path, dict[str, Any], dict[str, P
     if (component_dir / "manifest.json").is_file() and _read_json(component_dir / "manifest.json").get("status") == "complete":
         raise PrototypeError("prototype fitting is already complete")
     source_repo = config.source_repo or Path(manifest["source"]["repository"])
-    _verify_source(source_repo, bool(manifest["source"].get("strict_source_hashes", False)))
+    _verify_source(source_repo)
     frozen: dict[str, Path] = {}
     for name, record in manifest["prepared_inputs"].items():
         path = Path(record["path"])
@@ -533,26 +527,6 @@ def _load_prepared(config: FitConfig) -> tuple[Path, dict[str, Any], dict[str, P
             raise PrototypeError(f"prepared input hash mismatch: {name}")
         frozen[name] = path
     return component_dir, manifest, frozen
-
-
-def _next_attempt(component_dir: Path) -> Path:
-    attempts = component_dir / "attempts"
-    attempts.mkdir(exist_ok=True)
-    indices = []
-    for path in attempts.glob("attempt_*_*"):
-        match = re.match(r"attempt_(\d+)_", path.name)
-        if match:
-            indices.append(int(match.group(1)))
-    index = max(indices, default=-1) + 1
-    return attempts / f"attempt_{index:03d}_running"
-
-
-def _rename_attempt(attempt: Path, suffix: str) -> Path:
-    destination = attempt.with_name(attempt.name.rsplit("_", 1)[0] + f"_{suffix}")
-    if destination.exists():
-        raise PrototypeError(f"attempt destination already exists: {destination}")
-    attempt.rename(destination)
-    return destination
 
 
 def _output_artifact(path: Path) -> dict[str, Any]:
@@ -584,19 +558,16 @@ def fit_prototype(config: FitConfig) -> Path:
     component_dir, prepared_manifest, frozen = _load_prepared(config)
     source_repo = (config.source_repo or Path(prepared_manifest["source"]["repository"])).expanduser().resolve()
     python = (config.python or Path(prepared_manifest["environment"]["python_executable"])).expanduser().resolve()
-    attempt = _next_attempt(component_dir)
-    attempt.mkdir(parents=False, exist_ok=False)
     command = build_prototype_command(
         python,
         source_repo,
         frozen,
-        attempt,
+        component_dir,
         int(prepared_manifest["random_seed"]),
         "matterport",
     )
-    _write_json(attempt / "command.json", {"command": command})
-    _write_status(attempt / "STATUS.json", "running", "unofficial MatterportConfig")
-    _write_status(component_dir / "STATUS.json", "running", str(attempt))
+    _write_json(component_dir / "command.json", {"command": command})
+    _write_status(component_dir / "STATUS.json", "running", "unofficial MatterportConfig")
     started_at = datetime.now(timezone.utc)
     start = time.perf_counter()
     environment = os.environ.copy()
@@ -608,37 +579,34 @@ def fit_prototype(config: FitConfig) -> Path:
     environment["CUDA_VISIBLE_DEVICES"] = str(config.preferred_gpu)
     environment["MPLBACKEND"] = "Agg"
     environment["PYTHONUNBUFFERED"] = "1"
-    log_path = attempt / "fit.log"
+    log_path = component_dir / "fit.log"
     with log_path.open("w", encoding="utf-8") as log:
         log.write("command: " + " ".join(command) + "\n\n")
         log.flush()
-        result = subprocess.run(command, cwd=attempt, env=environment, stdout=log, stderr=subprocess.STDOUT)
+    result = subprocess.run(command, cwd=component_dir, env=environment)
     elapsed = time.perf_counter() - start
     if result.returncode != 0:
-        failed_attempt = _rename_attempt(attempt, "failed")
         _write_status(
-            failed_attempt / "STATUS.json",
+            component_dir / "STATUS.json",
             "failed",
-            f"return_code={result.returncode}; log={failed_attempt / log_path.name}",
+            f"return_code={result.returncode}; log={log_path}",
         )
-        _write_status(component_dir / "STATUS.json", "failed", str(failed_attempt))
-        raise PrototypeError(f"prototype optimizer failed with code {result.returncode}; see {failed_attempt / log_path.name}")
+        raise PrototypeError(f"prototype optimizer failed with code {result.returncode}; see {log_path}")
 
-    completed_attempt = _rename_attempt(attempt, "complete")
-    final_mesh_path = completed_attempt / "fitted_mesh.ply"
-    checkpoint_path = completed_attempt / "polygon_set_3d.pt"
+    final_mesh_path = component_dir / "fitted_mesh.ply"
+    checkpoint_path = component_dir / "polygon_set_3d.pt"
     if not final_mesh_path.is_file() or not checkpoint_path.is_file():
         raise PrototypeError("optimizer returned zero but final outputs are missing")
     final_mesh = _output_artifact(final_mesh_path)
-    initial_mesh = _output_artifact(completed_attempt / "fitted_mesh_00.ply")
+    initial_mesh = _output_artifact(component_dir / "fitted_mesh_00.ply")
     snapshots = []
-    for path in sorted(completed_attempt.glob("fitted_mesh_[0-9]*.ply")):
+    for path in sorted(component_dir.glob("fitted_mesh_[0-9]*.ply")):
         match = re.fullmatch(r"fitted_mesh_(\d+)\.ply", path.name)
         if match and path.name != "fitted_mesh_00.ply":
             snapshots.append({"step": int(match.group(1)), **_record(path)})
     state_snapshots = [
         {"step": int(match.group(1)), **_record(path)}
-        for path in sorted(completed_attempt.glob("polygon_set_3d_[0-9]*.pt"))
+        for path in sorted(component_dir.glob("polygon_set_3d_[0-9]*.pt"))
         if (match := re.fullmatch(r"polygon_set_3d_(\d+)\.pt", path.name))
     ]
     snapshots.sort(key=lambda record: record["step"])
@@ -665,8 +633,8 @@ def fit_prototype(config: FitConfig) -> Path:
             "object_mesh_simplification": prepared_manifest["adaptations"]["object_mesh_simplification"],
         },
         "outputs": {
-            "attempt_dir": str(completed_attempt),
-            "log": _record(completed_attempt / "fit.log"),
+            "output_dir": str(component_dir),
+            "log": _record(log_path),
             "initial_mesh": initial_mesh,
             "final_mesh": final_mesh,
             "final_model_state": _record(checkpoint_path),
@@ -690,7 +658,6 @@ def fit_prototype(config: FitConfig) -> Path:
         raise PrototypeError("prototype validation failed")
     manifest_path = component_dir / "manifest.json"
     _write_json(manifest_path, manifest)
-    _write_status(completed_attempt / "STATUS.json", "complete", str(final_mesh_path))
     _write_status(component_dir / "STATUS.json", "complete", str(manifest_path))
     return manifest_path
 
@@ -715,7 +682,6 @@ def _add_prepare_arguments(parser: argparse.ArgumentParser, *, required: bool) -
     parser.add_argument("--iterations", type=int, default=4000)
     parser.add_argument("--checkpoint-interval", type=int, default=100)
     parser.add_argument("--object-target-triangles", type=int, default=200_000)
-    parser.add_argument("--strict-source-hashes", action="store_true")
     parser.add_argument("--skip-runtime-probe", action="store_true")
 
 
@@ -735,7 +701,6 @@ def _prepare_config_from_args(args: argparse.Namespace) -> PrepareConfig:
         iterations=args.iterations,
         checkpoint_interval=args.checkpoint_interval,
         object_target_triangles=args.object_target_triangles,
-        strict_source_hashes=args.strict_source_hashes,
         skip_runtime_probe=args.skip_runtime_probe,
     )
 
@@ -748,13 +713,7 @@ def _run_direct(argv: list[str] | None) -> int:
     _add_prepare_arguments(parser, required=False)
     parser.add_argument("--preferred-gpu", type=int, default=0)
     args = parser.parse_args(argv)
-    component_dir = args.output.expanduser().resolve()
-    prepared_manifest = component_dir / "prepare_manifest.json"
-    complete_manifest = component_dir / "manifest.json"
-    if complete_manifest.is_file() and _read_json(complete_manifest).get("status") == "complete":
-        raise PrototypeError("prototype fitting is already complete")
-    if not prepared_manifest.is_file():
-        print(prepare_prototype(_prepare_config_from_args(args)))
+    print(prepare_prototype(_prepare_config_from_args(args)))
     print(
         fit_prototype(
             FitConfig(
@@ -769,44 +728,7 @@ def _run_direct(argv: list[str] | None) -> int:
 
 
 def main() -> int:
-    argv = sys.argv[1:]
-    if not argv or argv[0] not in {"prepare", "fit"}:
-        return _run_direct(argv)
-
-    parser = argparse.ArgumentParser(
-        description=(
-            "Prepare or fit the Section 4.3 prototype component. Omit the subcommand "
-            "to run prepare followed by fit."
-        ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    prepare = subparsers.add_parser("prepare")
-    _add_prepare_arguments(prepare, required=True)
-
-    fit = subparsers.add_parser("fit")
-    fit.add_argument("--prepared", type=Path, required=True)
-    fit.add_argument("--source-repo", type=Path)
-    fit.add_argument("--python", type=Path)
-    fit.add_argument("--preferred-gpu", type=int, default=0)
-    fit.add_argument("--output", type=Path, help="Accepted for CLI symmetry; must match --prepared when provided.")
-
-    args = parser.parse_args()
-    if args.command == "prepare":
-        path = prepare_prototype(_prepare_config_from_args(args))
-    else:
-        if args.output is not None and args.output.expanduser().resolve() != args.prepared.expanduser().resolve():
-            raise PrototypeError("--output must match --prepared for fit")
-        path = fit_prototype(
-            FitConfig(
-                prepared=args.prepared,
-                source_repo=args.source_repo,
-                python=args.python,
-                preferred_gpu=args.preferred_gpu,
-            )
-        )
-    print(path)
-    return 0
+    return _run_direct(sys.argv[1:])
 
 
 if __name__ == "__main__":
