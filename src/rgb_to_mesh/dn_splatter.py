@@ -9,7 +9,6 @@ if __package__ in {None, ""}:
     __package__ = "houselayout3d.rgb_to_mesh"
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -23,6 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.camera import load_pinhole_camera_from_transforms
 
 
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
@@ -38,7 +39,6 @@ LPIPS_ALEXNET_CHECKPOINT = Path(
 METRIC3D_REPOSITORY = Path(
     "external/Metric3D"
 )
-CAMERA_PARAMETERS = Path("camera_param.json")
 
 
 class DNSplatterError(RuntimeError):
@@ -107,36 +107,24 @@ def _component_dir(config: DNSplatterConfig) -> Path:
     return config.storage.output.expanduser().resolve()
 
 
-def load_camera_parameters(path: Path = CAMERA_PARAMETERS) -> CameraConfig:
-    payload = _read_json(path)
-    intrinsics = payload.get("pinhole_intrinsics")
-    resolution = payload.get("pinhole_resolution")
-    if (
-        not isinstance(intrinsics, list)
-        or len(intrinsics) != 4
-        or not isinstance(resolution, list)
-        or len(resolution) != 2
-    ):
-        raise DNSplatterError(
-            f"camera parameters must contain pinhole_intrinsics[fx,fy,cx,cy] "
-            f"and pinhole_resolution[width,height]: {path}"
-        )
-    camera = CameraConfig(
+def load_camera_from_transforms(path: Path) -> CameraConfig:
+    try:
+        camera = load_pinhole_camera_from_transforms(path)
+    except Exception as error:
+        raise DNSplatterError(str(error)) from error
+    return CameraConfig(
         model="PINHOLE",
-        width=int(resolution[0]),
-        height=int(resolution[1]),
-        fx=float(intrinsics[0]),
-        fy=float(intrinsics[1]),
-        cx=float(intrinsics[2]),
-        cy=float(intrinsics[3]),
+        width=camera.width,
+        height=camera.height,
+        fx=camera.fx,
+        fy=camera.fy,
+        cx=camera.cx,
+        cy=camera.cy,
     )
-    if min(camera.width, camera.height) <= 0 or min(camera.fx, camera.fy) <= 0:
-        raise DNSplatterError("camera dimensions and focal lengths must be positive")
-    return camera
 
 
 def build_config_from_args(args: argparse.Namespace) -> DNSplatterConfig:
-    camera = load_camera_parameters()
+    camera = load_camera_from_transforms(args.transforms.expanduser().resolve())
     method = args.method
     if method != "dn-splatter":
         raise DNSplatterError("--method must be dn-splatter")
@@ -181,14 +169,6 @@ def build_config_from_args(args: argparse.Namespace) -> DNSplatterConfig:
         ),
         runtime=RuntimeConfig(random_seed=args.random_seed),
     )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -379,7 +359,6 @@ def _create_seed_pointcloud(
         "sampled_far_points_rejected": saturated_rejected,
         "bounds_min_meters": final_points.min(axis=0).tolist(),
         "bounds_max_meters": final_points.max(axis=0).tolist(),
-        "sha256": _sha256(output_path),
         "size_bytes": output_path.stat().st_size,
     }
 
@@ -612,7 +591,6 @@ def prepare_dn_splatter(
             "inputs": {
                 "pose_transforms": {
                     "path": str(transforms_path),
-                    "sha256": _sha256(transforms_path),
                 },
                 "images": str(image_dir),
                 "depth": str(depth_dir),
@@ -620,7 +598,6 @@ def prepare_dn_splatter(
             "dataset": {
                 "root": str(dataset_dir),
                 "transforms": str(dataset_transforms_path),
-                "transforms_sha256": _sha256(dataset_transforms_path),
                 "images_symlink_target": str(image_dir),
                 "depth_symlink_target": str(depth_dir),
                 "seed_pointcloud": str(seed_path),
@@ -767,7 +744,6 @@ def train_dn_splatter(
         "training_command": command if command is not None else sys.argv,
         "training_dependencies": {
             "lpips_alexnet_checkpoint": str(lpips_checkpoint),
-            "lpips_alexnet_sha256": _sha256(lpips_checkpoint),
         },
         "validation": {
             "return_code": result.returncode,
@@ -779,9 +755,7 @@ def train_dn_splatter(
         "outputs": {
             "training_root": str(training_root),
             "training_config": str(config_path),
-            "training_config_sha256": _sha256(config_path),
             "final_checkpoint": str(final_checkpoint),
-            "final_checkpoint_sha256": _sha256(final_checkpoint),
             "final_checkpoint_size_bytes": final_checkpoint.stat().st_size,
             "training_log": str(log_path),
         },

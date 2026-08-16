@@ -1,11 +1,19 @@
 ## Steps
 
+### Required inputs
+Under `ROOT`: 
+```text
+<ROOT>/images/
+<ROOT>/transforms.json
+```
+
 ### rgb-to-mesh
 ```bash
 ROOT=data/insta360/r04
 
 conda run -n houselayout3d-layout python src/rgb_to_mesh/metric3d.py \
     --images ${ROOT}/images \
+    --transforms ${ROOT}/transforms.json \
     --output ${ROOT}/metric3d
 
 conda run -n nerfstudio python src/rgb_to_mesh/dn_splatter.py \
@@ -25,6 +33,7 @@ ROOT=data/insta360/r04
 
 conda run -n houselayout3d-layout python src/layout_skeleton/oneformer.py \
     --images ${ROOT}/images \
+    --transforms ${ROOT}/transforms.json \
     --model-dir pretrained_weights/oneformer_coco_swin_large \
     --output ${ROOT}/oneformer
 
@@ -82,4 +91,3 @@ conda run --no-capture-output -n houselayout3d-layout python src/layout_export/l
     --prototype ${ROOT}/prototype \
     --output ${ROOT}/layout
 ```
-

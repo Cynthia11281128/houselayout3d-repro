@@ -294,7 +294,7 @@ scene_graph/
 
 ### Validation
 
-- prototype and skeleton manifests are complete and hashes match;
+- prototype and skeleton manifests are complete and declared paths exist;
 - exactly one default level is declared;
 - floorplan geometry is valid and non-empty;
 - every room polygon lies within the floorplan, allowing small numeric tolerance;
@@ -448,7 +448,7 @@ layout/
 
 ### Validation
 
-- scene graph manifest is complete and hashes match;
+- scene graph manifest is complete and declared paths exist;
 - every room produces finite floor, ceiling, and wall geometry;
 - every generated polygon has at least three vertices and non-zero area;
 - no NaN/Inf in exported vertices;
@@ -483,7 +483,7 @@ Section 4.4 single-floor migration is complete when:
 - `scene_graph/graph.json` contains one level, valid room nodes, valid opening edges, and any detected windows/stairs;
 - `layout/manifest.json` completes from the scene graph;
 - `layout/layout.json` contains final wall, floor, ceiling, door/opening, window, and stair entities where present;
-- exported meshes are finite, reloadable, and declared in the manifest with hashes;
+- exported meshes are finite, reloadable, and declared in the manifest with paths and sizes;
 - no floor-identification logic is required to interpret the output;
 - all deviations from the multi-floor paper algorithm are recorded in the manifests.
 

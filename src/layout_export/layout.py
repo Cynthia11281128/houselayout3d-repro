@@ -11,7 +11,6 @@ if __package__ in {None, ""}:
 
 import argparse
 import colorsys
-import hashlib
 import json
 import math
 import os
@@ -42,14 +41,6 @@ from ._core.triangulation import iter_polygons
 FALLBACK_COLOR = (230, 38, 219)
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -59,7 +50,7 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def record(path: Path) -> dict[str, Any]:
-    return {"path": str(path), "sha256": sha256(path), "size_bytes": path.stat().st_size}
+    return {"path": str(path), "size_bytes": path.stat().st_size}
 
 
 def write_status(component_dir: Path, state: str, detail: str = "") -> None:

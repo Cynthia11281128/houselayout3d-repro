@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import platform
@@ -28,14 +27,6 @@ POISSON_DEPTH = 9
 
 class MeshError(RuntimeError):
     """Raised when the mesh export or validation fails."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -166,10 +157,6 @@ def _verify_dn_splatter(dn_splatter_dir: Path) -> tuple[Path, Path, dict[str, An
             "DN-Splatter config or checkpoint is missing: "
             f"{config_path}, {checkpoint_path}"
         )
-    if _sha256(config_path) != manifest["outputs"]["training_config_sha256"]:
-        raise MeshError("DN-Splatter training config hash no longer matches")
-    if _sha256(checkpoint_path) != manifest["outputs"]["final_checkpoint_sha256"]:
-        raise MeshError("DN-Splatter checkpoint hash no longer matches")
     return config_path, checkpoint_path, manifest
 
 
@@ -369,7 +356,6 @@ def _pointcloud_stats(path: Path) -> dict[str, Any]:
         raise MeshError("more than one percent of point-cloud normals are invalid")
     return {
         "path": str(path),
-        "sha256": _sha256(path),
         "size_bytes": path.stat().st_size,
         "point_count": int(len(points)),
         "has_normals": True,
@@ -399,7 +385,6 @@ def _mesh_stats(path: Path) -> dict[str, Any]:
         raise MeshError("Poisson mesh contains invalid triangle indices")
     return {
         "path": str(path),
-        "sha256": _sha256(path),
         "size_bytes": path.stat().st_size,
         "vertex_count": int(len(vertices)),
         "triangle_count": int(len(triangles)),
@@ -485,11 +470,9 @@ def run_mesh(
             "command": command if command is not None else sys.argv,
             "inputs": {
                 "dn_splatter": str(dn_splatter_dir),
-                "dn_splatter_manifest_sha256": _sha256(dn_splatter_dir / "manifest.json"),
                 "training_config": str(training_config),
                 "runtime_training_config": str(runtime_training_config),
                 "checkpoint": str(checkpoint_path),
-                "checkpoint_sha256": dn_manifest["outputs"]["final_checkpoint_sha256"],
             },
             "algorithm": {
                 "implementation": "DN-Splatter gs-mesh dn",

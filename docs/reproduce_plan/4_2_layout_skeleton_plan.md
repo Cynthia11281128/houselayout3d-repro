@@ -99,7 +99,7 @@ Inputs:
 
 - image directory;
 - optional image list, defaulting to sorted supported images;
-- camera width/height validation, either from `camera_param.json` or explicit CLI args;
+- camera width/height validation from `transforms.json`;
 - local OneFormer model directory;
 - output directory;
 - random seed;
@@ -121,7 +121,7 @@ oneformer/
 
 Validation:
 
-- every input image hash is recorded;
+- every input image path and size is recorded;
 - each output map has the expected camera resolution;
 - COCO IDs are in `[0, 132]`;
 - layout IDs are in `[0, 8]`;
@@ -204,7 +204,7 @@ Validation:
 - all final labels are in range;
 - three superpoint levels are produced, unless explicitly configured otherwise;
 - structural, object, stair, and inaccurate mesh subsets are finite when non-empty;
-- manifest records all input hashes, output hashes, algorithm parameters, environment, and warnings.
+- manifest records input/output paths, algorithm parameters, environment, and warnings.
 
 ## CLI Design
 
@@ -215,7 +215,7 @@ OneFormer example:
 ```bash
 python src/layout_skeleton/oneformer.py \
   --images data/insta360/r04/images \
-  --camera camera_param.json \
+  --transforms data/insta360/r04/transforms.json \
   --model-dir pretrained_weights/oneformer_coco_swin_large \
   --output data/insta360/r04/oneformer
 ```
@@ -228,7 +228,6 @@ python src/layout_skeleton/skeleton.py \
   --dn-splatter data/insta360/r04/dn_splatter \
   --mesh data/insta360/r04/mesh/export/DepthAndNormalMapsPoisson_poisson_mesh.ply \
   --oneformer data/insta360/r04/oneformer \
-  --camera camera_param.json \
   --ns-render /path/to/ns-render \
   --superpoint-repo external/superpoint_transformer \
   --output data/insta360/r04/skeleton
@@ -259,7 +258,7 @@ The migration should fail fast with actionable messages when a runtime dependenc
 
 1. Create `src/layout_skeleton/labels.py` and unit-test the COCO-to-layout LUT.
 2. Migrate OneFormer inference into `src/layout_skeleton/oneformer.py` with explicit CLI args and manifest output.
-3. Add lightweight tests for image-list ordering, label remapping, manifest shape, and output hash recording. Mock the model for unit tests if needed.
+3. Add lightweight tests for image-list ordering, label remapping, and manifest shape. Mock the model for unit tests if needed.
 4. Migrate skeleton helper functions that do not depend on heavy runtimes: backprojection, ray sampling, vertex voting, label aggregation, mesh subset bookkeeping.
 5. Add tests for backprojection math, sample count, vertex vote accumulation, zero-vote superpoint fallback, and filtered label groups.
 6. Wire the heavy skeleton runtime: raw-depth render, Open3D mesh load/write, Superpoint Transformer hierarchy.
@@ -277,7 +276,7 @@ The migration should fail fast with actionable messages when a runtime dependenc
 - `oneformer/manifest.json` completes for the selected scene;
 - `skeleton/manifest.json` completes for the selected scene;
 - skeleton output includes semantic mesh, structural mesh, object mesh, stair mesh if present, inaccurate mesh if present, superpoint arrays, ray arrays, and visualizations;
-- manifests include enough hashes and parameters to rerun or audit the stage;
+- manifests include enough paths and parameters to rerun or audit the stage;
 - no 4.3 prototype-fitting assumptions leak into the 4.2 outputs.
 
 ## Known Risks

@@ -10,7 +10,6 @@ if __package__ in {None, ""}:
     __package__ = "src.layout_skeleton"
 
 import argparse
-import hashlib
 import json
 import os
 import platform
@@ -24,6 +23,8 @@ from typing import Any
 
 import numpy as np
 from PIL import Image
+
+from src.camera import load_pinhole_camera_from_transforms
 
 from .labels import LAYOUT_LABELS, LAYOUT_PALETTE, appendix_layout_lut, label_contract
 
@@ -39,14 +40,6 @@ class OneFormerError(RuntimeError):
 class CameraConfig:
     width: int
     height: int
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -69,25 +62,12 @@ def _write_status(output_dir: Path, state: str, detail: str = "") -> None:
     )
 
 
-def _combined_digest(records: list[dict[str, Any]], key: str) -> str:
-    digest = hashlib.sha256()
-    for record in records:
-        digest.update(record["name"].encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(record[key].encode("ascii"))
-        digest.update(b"\n")
-    return digest.hexdigest()
-
-
-def load_camera(path: Path) -> CameraConfig:
-    payload = _read_json(path)
-    resolution = payload.get("pinhole_resolution")
-    if not isinstance(resolution, list) or len(resolution) != 2:
-        raise OneFormerError(f"camera file must contain pinhole_resolution: {path}")
-    camera = CameraConfig(width=int(resolution[0]), height=int(resolution[1]))
-    if min(camera.width, camera.height) <= 0:
-        raise OneFormerError("camera width and height must be positive")
-    return camera
+def load_camera_from_transforms(path: Path) -> CameraConfig:
+    try:
+        camera = load_pinhole_camera_from_transforms(path)
+    except Exception as error:
+        raise OneFormerError(str(error)) from error
+    return CameraConfig(width=camera.width, height=camera.height)
 
 
 def _verify_model_files(model_dir: Path) -> dict[str, dict[str, Any]]:
@@ -109,7 +89,6 @@ def _verify_model_files(model_dir: Path) -> dict[str, dict[str, Any]]:
             raise OneFormerError(f"OneFormer model file is missing: {path}")
         records[name] = {
             "path": str(path),
-            "sha256": _sha256(path),
             "size_bytes": path.stat().st_size,
         }
     return records
@@ -138,7 +117,6 @@ def _scan_images(images: Path, image_list: Path | None) -> list[dict[str, Any]]:
                 "index": index,
                 "name": path.name,
                 "path": str(path),
-                "sha256": _sha256(path),
                 "size_bytes": path.stat().st_size,
             }
         )
@@ -154,6 +132,7 @@ def _save_preview(image: Image.Image, layout: np.ndarray, output: Path) -> None:
 
 def run_oneformer(
     images: Path,
+    transforms_path: Path,
     output_dir: Path,
     camera: CameraConfig,
     model_dir: Path,
@@ -166,6 +145,7 @@ def run_oneformer(
     """Run deterministic OneFormer semantic segmentation for every input frame."""
 
     images = images.expanduser().resolve()
+    transforms_path = transforms_path.expanduser().resolve()
     output_dir = output_dir.expanduser()
     model_dir = model_dir.expanduser().resolve()
     if output_dir.exists():
@@ -249,8 +229,6 @@ def run_oneformer(
                 iterator = tqdm(iterator, total=len(records), desc="OneFormer", unit="frame")
             for index, source in iterator:
                 path = Path(source["path"])
-                if _sha256(path) != source["sha256"]:
-                    raise OneFormerError(f"input image hash changed: {path}")
                 with Image.open(path) as loaded:
                     image = loaded.convert("RGB")
                 if image.size != expected_size:
@@ -281,11 +259,8 @@ def run_oneformer(
                 record = {
                     "index": index,
                     "name": path.name,
-                    "source_sha256": source["sha256"],
                     "coco_path": str(coco_path),
-                    "coco_sha256": _sha256(coco_path),
                     "layout_path": str(layout_path),
-                    "layout_sha256": _sha256(layout_path),
                     "coco_histogram": {str(i): int(v) for i, v in enumerate(coco_counts) if v},
                     "layout_histogram": {str(i): int(v) for i, v in enumerate(layout_counts) if v},
                     "elapsed_seconds": round(time.perf_counter() - frame_start, 6),
@@ -310,6 +285,9 @@ def run_oneformer(
             "random_seed": random_seed,
             "inputs": {
                 "images": records,
+                "transforms": {
+                    "path": str(transforms_path),
+                },
                 "model_files": model_files,
             },
             "algorithm": {
@@ -324,10 +302,8 @@ def run_oneformer(
                 "layout_id_dir": str(layout_dir),
                 "preview_dir": str(preview_dir),
                 "preview_count": len(preview_indices),
-                "labels": {"path": str(labels_path), "sha256": _sha256(labels_path)},
-                "per_image": {"path": str(per_image_path), "sha256": _sha256(per_image_path)},
-                "coco_combined_sha256": _combined_digest(output_records, "coco_sha256"),
-                "layout_combined_sha256": _combined_digest(output_records, "layout_sha256"),
+                "labels": {"path": str(labels_path)},
+                "per_image": {"path": str(per_image_path)},
             },
             "statistics": {
                 "coco_pixel_histogram": {str(i): int(v) for i, v in enumerate(coco_histogram) if v},
@@ -338,7 +314,6 @@ def run_oneformer(
             },
             "validation": {
                 "frame_count": len(output_records),
-                "all_input_hashes_match": True,
                 "all_output_shapes_match_camera": True,
                 "all_coco_ids_in_range": True,
                 "all_layout_ids_in_range": True,
@@ -373,7 +348,7 @@ def main() -> int:
     )
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--image-list", type=Path)
-    parser.add_argument("--camera", type=Path, default=Path("camera_param.json"))
+    parser.add_argument("--transforms", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--task", default="semantic")
@@ -382,8 +357,9 @@ def main() -> int:
     args = parser.parse_args()
     manifest = run_oneformer(
         images=args.images,
+        transforms_path=args.transforms,
         output_dir=args.output,
-        camera=load_camera(args.camera),
+        camera=load_camera_from_transforms(args.transforms),
         model_dir=args.model_dir,
         image_list=args.image_list,
         task=args.task,

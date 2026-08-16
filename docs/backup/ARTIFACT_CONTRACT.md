@@ -10,7 +10,7 @@ Each run is stored below `outputs/<scene>/<run-id>/`. A component owns exactly o
 | `metric3d` | Metric depth plus auxiliary native normals and confidences |
 | `dn_splatter` | Known-pose dataset, metric seed cloud, training config, and checkpoints |
 | `mesh` | Poisson point cloud, mesh, and mesh validation |
-| `oneformer` | Per-frame COCO IDs, Appendix-A layout IDs, previews, and immutable per-frame hashes |
+| `oneformer` | Per-frame COCO IDs, Appendix-A layout IDs, previews, and per-frame records |
 | `skeleton` | Rendered depths, semantic rays, superpoint labels, and structural/object/stair meshes |
 | `polygon_init` | RANSAC planes, rectified mesh, and polygon metadata |
 | `prototype` | Optimization checkpoints and fitted prototype |
@@ -21,11 +21,11 @@ Each run is stored below `outputs/<scene>/<run-id>/`. A component owns exactly o
 Every completed component must contain `manifest.json` with at least:
 
 - schema version, scene, component, status, and timestamps;
-- input artifact paths and SHA256 digests;
+- input artifact paths;
 - exact command, source revisions, environment, and random seed when applicable;
 - output paths, counts, validation results, warnings, and elapsed time.
 
-A component is resumable only when its manifest has `status: complete` and all declared output hashes still match.
+A component is resumable only when its manifest has `status: complete` and all declared output paths still exist.
 
 `input/images.txt` is the only image list authorized for reconstruction. The active known-pose path consumes only the explicitly configured front-view `poses.csv`; adjacent trajectories and ground truth remain unauthorized.
 
@@ -33,7 +33,7 @@ A component is resumable only when its manifest has `status: complete` and all d
 
 `polygon_init` consumes the structural subset, final-level superpoint indices, and semantic labels declared by `skeleton`. Its plane loop follows Appendix A Algorithm 1: RANSAC on the largest remaining superpoint, global unassigned plane inliers, mesh-edge connected components, maximum seed overlap, then the boundary of selected-component triangles.
 
-`prototype` freezes and hashes every `skeleton` and `polygon_init` optimizer input before the long run. It executes the uploaded unofficial `fit_prototype.py` and its `mesh_fitting_3D` modules through a deterministic seeded launcher.
+`prototype` freezes every `skeleton` and `polygon_init` optimizer input before the long run. It executes the uploaded unofficial `fit_prototype.py` and its `mesh_fitting_3D` modules through a deterministic seeded launcher.
 
 `scene_graph` consumes the final prototype serialized polygon state rather than inferring semantics from PLY colors. It implements Appendix D.1-D.5 room extraction, OpenSeg/CLIP room semantics, outdoor-leaf pruning, and stair endpoint assignment.
 

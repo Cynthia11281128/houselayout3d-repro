@@ -11,7 +11,6 @@ if __package__ in {None, ""}:
 
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -71,14 +70,6 @@ class FitConfig:
     preferred_gpu: int = 0
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -100,7 +91,7 @@ def _write_status(path: Path, state: str, detail: str = "") -> None:
 
 
 def _record(path: Path) -> dict[str, Any]:
-    return {"path": str(path), "sha256": _sha256(path), "size_bytes": path.stat().st_size}
+    return {"path": str(path), "size_bytes": path.stat().st_size}
 
 
 def _component_manifest(path_or_dir: Path, name: str) -> Path:
@@ -137,8 +128,8 @@ def _verify_manifest_record(
     component: str,
 ) -> Path:
     path = _resolve_component_artifact(manifest_path, record["path"], component)
-    if not path.is_file() or _sha256(path) != record["sha256"]:
-        raise PrototypeError(f"artifact hash mismatch for {name}: {path}")
+    if not path.is_file():
+        raise PrototypeError(f"artifact is missing for {name}: {path}")
     return path
 
 
@@ -155,10 +146,8 @@ def _verify_source(source_repo: Path) -> dict[str, dict[str, Any]]:
         path = root / relative
         if not path.is_file():
             raise PrototypeError(f"unofficial source file is missing: {path}")
-        actual = _sha256(path)
         records[relative] = {
             "path": str(path),
-            "sha256": actual,
             "size_bytes": path.stat().st_size,
         }
     return records
@@ -213,7 +202,6 @@ def _verify_inputs(config: PrepareConfig) -> dict[str, Path]:
         raise PrototypeError("structure class-probability artifact is missing")
     structure_classes_record = {
         "path": structure_record["classes_path"],
-        "sha256": structure_record["classes_sha256"],
     }
     object_record = skeleton_outputs["meshes"]["objects"]
     object_mesh = None
@@ -523,8 +511,8 @@ def _load_prepared(config: FitConfig) -> tuple[Path, dict[str, Any], dict[str, P
     frozen: dict[str, Path] = {}
     for name, record in manifest["prepared_inputs"].items():
         path = Path(record["path"])
-        if not path.is_file() or _sha256(path) != record["sha256"]:
-            raise PrototypeError(f"prepared input hash mismatch: {name}")
+        if not path.is_file():
+            raise PrototypeError(f"prepared input is missing: {name}")
         frozen[name] = path
     return component_dir, manifest, frozen
 

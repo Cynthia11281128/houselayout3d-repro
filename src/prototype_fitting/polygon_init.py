@@ -10,7 +10,6 @@ if __package__ in {None, ""}:
     __package__ = "src.prototype_fitting"
 
 import argparse
-import hashlib
 import json
 import platform
 import sys
@@ -40,14 +39,6 @@ class PolygonInitConfig:
     ransac_iterations: int = 256
     rdp_epsilon_meters: float = 0.03
     random_seed: int = 0
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -102,8 +93,8 @@ def _component_manifest(path_or_dir: Path, name: str) -> Path:
 
 def _verify_record(manifest_path: Path, record: dict[str, Any], name: str, component: str) -> Path:
     path = _resolve_component_artifact(manifest_path, record["path"], component)
-    if not path.is_file() or _sha256(path) != record["sha256"]:
-        raise PolygonInitError(f"{name} hash mismatch: {path}")
+    if not path.is_file():
+        raise PolygonInitError(f"{name} is missing: {path}")
     return path
 
 
@@ -447,10 +438,7 @@ def _verify_inputs(config: PolygonInitConfig) -> dict[str, Any]:
         "label_names": _verify_record(manifest_path, labels_record, "semantic label names", "skeleton"),
     }
     if structure_record.get("classes_path"):
-        class_record = {
-            "path": structure_record["classes_path"],
-            "sha256": structure_record["classes_sha256"],
-        }
+        class_record = {"path": structure_record["classes_path"]}
         records["structure_classes"] = _verify_record(
             manifest_path, class_record, "structure class probabilities", "skeleton"
         )
@@ -476,7 +464,6 @@ def _mesh_artifact(path: Path, mesh: Any) -> dict[str, Any]:
         raise PolygonInitError(f"failed to write mesh: {path}")
     return {
         "path": str(path),
-        "sha256": _sha256(path),
         "size_bytes": path.stat().st_size,
         "vertex_count": len(mesh.vertices),
         "triangle_count": len(mesh.triangles),
@@ -862,27 +849,22 @@ def run_polygon_init(config: PolygonInitConfig, command: list[str] | None = None
             "inputs": {
                 "skeleton_manifest": {
                     "path": str(inputs["manifest_path"]),
-                    "sha256": _sha256(inputs["manifest_path"]),
                 },
                 "structure_mesh": {
                     "path": str(inputs["structure_mesh"]),
-                    "sha256": _sha256(inputs["structure_mesh"]),
                 },
                 "structure_classes": (
                     None
                     if inputs["structure_classes"] is None
                     else {
                         "path": str(inputs["structure_classes"]),
-                        "sha256": _sha256(inputs["structure_classes"]),
                     }
                 ),
                 "superpoint_segmentation": {
                     "path": str(inputs["segmentation"]),
-                    "sha256": _sha256(inputs["segmentation"]),
                 },
                 "vertex_hard_assignments": {
                     "path": str(inputs["hard_labels"]),
-                    "sha256": _sha256(inputs["hard_labels"]),
                 },
             },
             "algorithm": {
@@ -900,28 +882,23 @@ def run_polygon_init(config: PolygonInitConfig, command: list[str] | None = None
                 "plane_components_mesh": component_record,
                 "polygon_info": {
                     "path": str(polygon_path),
-                    "sha256": _sha256(polygon_path),
                     "size_bytes": polygon_path.stat().st_size,
                 },
                 "polygon_boundaries": {
                     "path": str(boundary_path),
-                    "sha256": _sha256(boundary_path),
                     "line_count": len(boundary_lines),
                 },
                 "plane_candidates": {
                     "path": str(component_dir / "plane_candidates.jsonl"),
-                    "sha256": _sha256(component_dir / "plane_candidates.jsonl"),
                     "count": len(candidate_records),
                 },
                 "rejected_components": {
                     "path": str(component_dir / "rejected_components.jsonl"),
-                    "sha256": _sha256(component_dir / "rejected_components.jsonl"),
                     "count": len(rejected_components),
                 },
                 "arrays": {
                     name: {
                         "path": str(component_dir / name),
-                        "sha256": _sha256(component_dir / name),
                     }
                     for name in array_names
                 },

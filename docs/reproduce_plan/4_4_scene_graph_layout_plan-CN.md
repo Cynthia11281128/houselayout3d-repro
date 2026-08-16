@@ -294,7 +294,7 @@ scene_graph/
 
 ### 验证
 
-- prototype 和 skeleton manifests complete，且 hashes match；
+- prototype 和 skeleton manifests complete，且声明路径存在；
 - 声明 exactly one default level；
 - floorplan geometry valid 且 non-empty；
 - 每个 room polygon 都位于 floorplan 内，允许 small numeric tolerance；
@@ -448,7 +448,7 @@ layout/
 
 ### 验证
 
-- scene graph manifest complete 且 hashes match；
+- scene graph manifest complete 且声明路径存在；
 - 每个 room 都生成 finite floor、ceiling 和 wall geometry；
 - 每个 generated polygon 至少有三个 vertices，且 area 非零；
 - exported vertices 中没有 NaN/Inf；
@@ -483,7 +483,7 @@ Section 4.4 single-floor migration 完成的条件：
 - `scene_graph/graph.json` 包含 one level、valid room nodes、valid opening edges，以及任何 detected windows/stairs；
 - `layout/manifest.json` 可以从 scene graph 完成；
 - `layout/layout.json` 包含最终 wall、floor、ceiling、door/opening、window 和 stair entities（如果存在）；
-- exported meshes finite、reloadable，并在 manifest 中声明 hashes；
+- exported meshes finite、reloadable，并在 manifest 中声明 paths 和 sizes；
 - 不需要 floor-identification logic 即可解释输出；
 - 所有与 multi-floor paper algorithm 的偏差都记录在 manifests 中。
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 import os
@@ -19,11 +18,12 @@ from typing import Any
 
 from tqdm import tqdm
 
+from src.camera import load_pinhole_camera_from_transforms
+
 
 METRIC3D_REPOSITORY = Path("external/Metric3D")
 METRIC3D_CHECKPOINT = Path("pretrained_weights/metric_depth_vit_large_800k.pth")
 METRIC3D_MODEL = "metric3d_vit_large"
-CAMERA_PARAMETERS = Path("camera_param.json")
 INPUT_HEIGHT = 616
 INPUT_WIDTH = 1064
 CANONICAL_FOCAL_LENGTH = 1000.0
@@ -48,14 +48,6 @@ class CameraConfig:
     fy: float
     cx: float
     cy: float
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -88,31 +80,19 @@ def _remove_existing_output(path: Path) -> None:
         raise Metric3DError(f"cannot overwrite unsupported output path: {path}")
 
 
-def load_camera_parameters(path: Path = CAMERA_PARAMETERS) -> CameraConfig:
-    payload = _read_json(path)
-    intrinsics = payload.get("pinhole_intrinsics")
-    resolution = payload.get("pinhole_resolution")
-    if (
-        not isinstance(intrinsics, list)
-        or len(intrinsics) != 4
-        or not isinstance(resolution, list)
-        or len(resolution) != 2
-    ):
-        raise Metric3DError(
-            f"camera parameters must contain pinhole_intrinsics[fx,fy,cx,cy] "
-            f"and pinhole_resolution[width,height]: {path}"
-        )
-    camera = CameraConfig(
-        width=int(resolution[0]),
-        height=int(resolution[1]),
-        fx=float(intrinsics[0]),
-        fy=float(intrinsics[1]),
-        cx=float(intrinsics[2]),
-        cy=float(intrinsics[3]),
+def load_camera_from_transforms(path: Path) -> CameraConfig:
+    try:
+        camera = load_pinhole_camera_from_transforms(path)
+    except Exception as error:
+        raise Metric3DError(str(error)) from error
+    return CameraConfig(
+        width=camera.width,
+        height=camera.height,
+        fx=camera.fx,
+        fy=camera.fy,
+        cx=camera.cx,
+        cy=camera.cy,
     )
-    if min(camera.width, camera.height) <= 0 or min(camera.fx, camera.fy) <= 0:
-        raise Metric3DError("camera dimensions and focal lengths must be positive")
-    return camera
 
 
 def _git_revision(repository: Path) -> str:
@@ -299,12 +279,14 @@ def _run_one(model, torch, functional, np, cv2, camera: CameraConfig, image_path
 
 def run_metric3d(
     image_dir: Path,
+    transforms_path: Path,
     output_dir: Path,
     image_glob: str,
     command: list[str] | None = None,
     overwrite: bool = False,
 ) -> Path:
     image_dir = image_dir.expanduser().resolve()
+    transforms_path = transforms_path.expanduser().resolve()
     output_dir = output_dir.expanduser()
     if not image_dir.is_dir():
         raise Metric3DError(f"image folder is missing: {image_dir}")
@@ -324,7 +306,7 @@ def run_metric3d(
     geometry_dir.mkdir()
     preview_dir.mkdir()
 
-    camera = load_camera_parameters()
+    camera = load_camera_from_transforms(transforms_path)
     started_at = datetime.now(timezone.utc)
     start = time.perf_counter()
     _write_status(output_dir, "loading_model", METRIC3D_MODEL)
@@ -332,7 +314,6 @@ def run_metric3d(
     records: list[dict[str, Any]] = []
 
     try:
-        weight_hash = _sha256(METRIC3D_CHECKPOINT)
         revision = _git_revision(METRIC3D_REPOSITORY)
         load_start = time.perf_counter()
         model, torch, functional, np, cv2, missing, unexpected = _load_model()
@@ -380,9 +361,7 @@ def run_metric3d(
                     "index": index,
                     "image": image_path.name,
                     "depth": str(depth_path),
-                    "depth_sha256": _sha256(depth_path),
                     "geometry": str(geometry_path),
-                    "geometry_sha256": _sha256(geometry_path),
                     "shape": [int(value) for value in depth.shape],
                     "resize_scale": resize_scale,
                     "padding": list(padding),
@@ -442,14 +421,15 @@ def run_metric3d(
             "inputs": {
                 "images": str(image_dir),
                 "image_glob": image_glob,
-                "camera_parameters": str(CAMERA_PARAMETERS),
+                "transforms": {
+                    "path": str(transforms_path),
+                },
             },
             "model": {
                 "name": METRIC3D_MODEL,
                 "repository": str(METRIC3D_REPOSITORY),
                 "revision": revision,
                 "weights": str(METRIC3D_CHECKPOINT),
-                "weights_sha256": weight_hash,
                 "checkpoint_missing_keys": missing,
                 "checkpoint_unexpected_keys": unexpected,
                 "input_size": [INPUT_HEIGHT, INPUT_WIDTH],
@@ -480,7 +460,6 @@ def run_metric3d(
                 "geometry_directory": str(geometry_dir),
                 "preview_directory": str(preview_dir),
                 "per_image_records": str(records_path),
-                "per_image_records_sha256": _sha256(records_path),
                 "progress": str(output_dir / "progress.json"),
             },
         }
@@ -511,6 +490,7 @@ def main() -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--images", type=Path, required=True)
+    parser.add_argument("--transforms", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--image-glob", default="*.png")
     parser.add_argument(
@@ -521,6 +501,7 @@ def main() -> int:
     args = parser.parse_args()
     path = run_metric3d(
         image_dir=args.images,
+        transforms_path=args.transforms,
         output_dir=args.output,
         image_glob=args.image_glob,
         command=sys.argv,

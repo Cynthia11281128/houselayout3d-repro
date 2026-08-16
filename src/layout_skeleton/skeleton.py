@@ -21,7 +21,6 @@ conda run -n nerfstudio python src/layout_skeleton/skeleton.py \
     --dn-splatter ${ROOT}/dn_splatter \
     --mesh ${ROOT}/mesh/export/DepthAndNormalMapsPoisson_poisson_mesh.ply \
     --oneformer ${ROOT}/oneformer \
-    --camera camera_param.json \
     --ns-render ${NS_RENDER} \
     --superpoint-repo ${SUPERPOINR_REPO} \
     --output ${ROOT}/skeleton \
@@ -32,7 +31,6 @@ conda run -n nerfstudio python src/layout_skeleton/skeleton.py \
 
 import argparse
 import gzip
-import hashlib
 import json
 import os
 import platform
@@ -47,6 +45,7 @@ from typing import Any
 
 import numpy as np
 
+from src.camera import load_pinhole_camera_from_transforms
 from src.rgb_to_mesh.dn_splatter import build_training_environment
 
 from .labels import LAYOUT_LABELS, LAYOUT_PALETTE
@@ -96,14 +95,6 @@ class SkeletonConfig:
     torch_home: Path | None = None
     overwrite: bool = False
     reuse_rendered_depth: bool = False
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -177,28 +168,19 @@ def _run_live_logged_command(
         return process.wait()
 
 
-def load_camera(path: Path) -> CameraConfig:
-    payload = _read_json(path)
-    intrinsics = payload.get("pinhole_intrinsics")
-    resolution = payload.get("pinhole_resolution")
-    if (
-        not isinstance(intrinsics, list)
-        or len(intrinsics) != 4
-        or not isinstance(resolution, list)
-        or len(resolution) != 2
-    ):
-        raise SkeletonError("camera file must contain pinhole_intrinsics and pinhole_resolution")
-    camera = CameraConfig(
-        width=int(resolution[0]),
-        height=int(resolution[1]),
-        fx=float(intrinsics[0]),
-        fy=float(intrinsics[1]),
-        cx=float(intrinsics[2]),
-        cy=float(intrinsics[3]),
+def load_camera_from_transforms(path: Path) -> CameraConfig:
+    try:
+        camera = load_pinhole_camera_from_transforms(path)
+    except Exception as error:
+        raise SkeletonError(str(error)) from error
+    return CameraConfig(
+        width=camera.width,
+        height=camera.height,
+        fx=camera.fx,
+        fy=camera.fy,
+        cx=camera.cx,
+        cy=camera.cy,
     )
-    if min(camera.width, camera.height, camera.fx, camera.fy) <= 0:
-        raise SkeletonError("camera dimensions and focal lengths must be positive")
-    return camera
 
 
 def _resolve_component_artifact(manifest_path: Path, path_text: str, component: str) -> Path:
@@ -393,10 +375,10 @@ def _load_inputs(config: SkeletonConfig) -> dict[str, Any]:
     checkpoint = _resolve_component_artifact(
         dn_manifest_path, dn_manifest["outputs"]["final_checkpoint"], "dn_splatter"
     )
-    if not training_config.is_file() or _sha256(training_config) != dn_manifest["outputs"]["training_config_sha256"]:
-        raise SkeletonError(f"dn_splatter training config hash mismatch: {training_config}")
-    if not checkpoint.is_file() or _sha256(checkpoint) != dn_manifest["outputs"]["final_checkpoint_sha256"]:
-        raise SkeletonError(f"dn_splatter checkpoint hash mismatch: {checkpoint}")
+    if not training_config.is_file():
+        raise SkeletonError(f"dn_splatter training config is missing: {training_config}")
+    if not checkpoint.is_file():
+        raise SkeletonError(f"dn_splatter checkpoint is missing: {checkpoint}")
 
     mesh_path = config.mesh.expanduser().resolve()
     if not mesh_path.is_file():
@@ -408,8 +390,8 @@ def _load_inputs(config: SkeletonConfig) -> dict[str, Any]:
         raise SkeletonError("oneformer manifest is not complete")
     per_image = oneformer_manifest["outputs"]["per_image"]
     per_image_path = _resolve_component_artifact(oneformer_manifest_path, per_image["path"], "oneformer")
-    if not per_image_path.is_file() or _sha256(per_image_path) != per_image["sha256"]:
-        raise SkeletonError(f"oneformer per-image hash mismatch: {per_image_path}")
+    if not per_image_path.is_file():
+        raise SkeletonError(f"oneformer per-image file is missing: {per_image_path}")
     semantic_records = [
         json.loads(line)
         for line in per_image_path.read_text(encoding="utf-8").splitlines()
@@ -419,8 +401,8 @@ def _load_inputs(config: SkeletonConfig) -> dict[str, Any]:
         raise SkeletonError("oneformer per-image count is inconsistent")
     for record in semantic_records:
         layout_path = _resolve_component_artifact(oneformer_manifest_path, record["layout_path"], "oneformer")
-        if not layout_path.is_file() or _sha256(layout_path) != record["layout_sha256"]:
-            raise SkeletonError(f"oneformer layout hash mismatch: {layout_path}")
+        if not layout_path.is_file():
+            raise SkeletonError(f"oneformer layout file is missing: {layout_path}")
         record["layout_path"] = str(layout_path)
 
     frame_names = [Path(frame["file_path"]).name for frame in frames]
@@ -486,7 +468,6 @@ def _load_rendered_depths(
             {
                 "name": path.name,
                 "path": str(path),
-                "sha256": _sha256(path),
                 "shape": list(depth.shape),
                 "dtype": str(depth.dtype),
                 "minimum_meters": float(depth.min()),
@@ -819,7 +800,6 @@ def _mesh_artifact(path: Path, mesh: Any) -> dict[str, Any]:
         raise SkeletonError(f"failed to write mesh: {path}")
     return {
         "path": str(path),
-        "sha256": _sha256(path),
         "size_bytes": path.stat().st_size,
         "vertex_count": len(mesh.vertices),
         "triangle_count": len(mesh.triangles),
@@ -864,7 +844,6 @@ def _write_semantic_meshes(
         classes_path = component_dir / f"{Path(filenames[name]).stem}_classes.npy"
         np.save(classes_path, probabilities[keep].astype(np.float16))
         record["classes_path"] = str(classes_path)
-        record["classes_sha256"] = _sha256(classes_path)
         records[name] = record
     return records
 
@@ -896,12 +875,10 @@ def _write_ray_visualizations(component_dir: Path, rays: dict[str, Any]) -> dict
     return {
         "sampled_semantic_points": {
             "path": str(cloud_path),
-            "sha256": _sha256(cloud_path),
             "point_count": len(points),
         },
         "ray_preview": {
             "path": str(line_path),
-            "sha256": _sha256(line_path),
             "ray_count": count,
         },
     }
@@ -1041,7 +1018,6 @@ def run_skeleton(config: SkeletonConfig, command: list[str] | None = None) -> Pa
         array_records = {
             name: {
                 "path": str(output / name),
-                "sha256": _sha256(output / name),
                 "size_bytes": (output / name).stat().st_size,
             }
             for name in array_names
@@ -1057,12 +1033,12 @@ def run_skeleton(config: SkeletonConfig, command: list[str] | None = None) -> Pa
             "command": command if command is not None else sys.argv,
             "random_seed": config.random_seed,
             "inputs": {
-                "transforms": {"path": str(inputs["transforms_path"]), "sha256": _sha256(inputs["transforms_path"])},
-                "dn_splatter_manifest": {"path": str(inputs["dn_manifest_path"]), "sha256": _sha256(inputs["dn_manifest_path"])},
-                "dn_splatter_training_config": {"path": str(inputs["training_config"]), "sha256": _sha256(inputs["training_config"])},
-                "runtime_training_config": {"path": str(runtime_training_config), "sha256": _sha256(runtime_training_config)},
-                "mesh": {"path": str(inputs["mesh_path"]), "sha256": _sha256(inputs["mesh_path"])},
-                "oneformer_manifest": {"path": str(inputs["oneformer_manifest_path"]), "sha256": _sha256(inputs["oneformer_manifest_path"])},
+                "transforms": {"path": str(inputs["transforms_path"])},
+                "dn_splatter_manifest": {"path": str(inputs["dn_manifest_path"])},
+                "dn_splatter_training_config": {"path": str(inputs["training_config"])},
+                "runtime_training_config": {"path": str(runtime_training_config)},
+                "mesh": {"path": str(inputs["mesh_path"])},
+                "oneformer_manifest": {"path": str(inputs["oneformer_manifest_path"])},
             },
             "algorithm": {
                 "depth": "DN-Splatter final-checkpoint rendered raw-depth in meters",
@@ -1165,7 +1141,6 @@ def main() -> int:
     parser.add_argument("--dn-splatter", type=Path, required=True)
     parser.add_argument("--mesh", type=Path, required=True)
     parser.add_argument("--oneformer", type=Path, required=True)
-    parser.add_argument("--camera", type=Path, default=Path("camera_param.json"))
     parser.add_argument("--ns-render", type=Path, required=True)
     parser.add_argument("--superpoint-repo", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1213,7 +1188,7 @@ def main() -> int:
         dn_splatter=args.dn_splatter,
         mesh=args.mesh,
         oneformer=args.oneformer,
-        camera=load_camera(args.camera),
+        camera=load_camera_from_transforms(args.transforms),
         ns_render=args.ns_render,
         superpoint=superpoint,
         output=args.output,

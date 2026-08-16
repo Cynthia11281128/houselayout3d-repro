@@ -158,7 +158,7 @@ The exact output names may follow `src_backup/polygon_init.py`, but the manifest
 
 ### Validation
 
-- skeleton manifest is complete and all declared hashes match;
+- skeleton manifest is complete and declared paths exist;
 - structural mesh is finite and non-empty;
 - superpoint segmentation length matches skeleton mesh vertex count before structural filtering;
 - each accepted polygon has:
@@ -241,8 +241,8 @@ The pipeline freezes inputs first, then immediately runs the optimizer.
 
 ### Preparation Algorithm
 
-1. Verify all skeleton and polygon-init input hashes.
-2. Verify unofficial source files exist and record their SHA256 hashes.
+1. Verify all skeleton and polygon-init input paths exist.
+2. Verify unofficial source files exist and record their paths and sizes.
 3. Probe the prototype Python runtime:
    - CUDA PyTorch;
    - PyTorch3D;
@@ -306,14 +306,14 @@ If the unofficial optimizer writes different filenames, wrap or adapt outputs so
 - final semantic class names/probabilities;
 - optimizer logs;
 - checkpoints or at least final checkpoint;
-- source file hashes;
+- source file paths and sizes;
 - runtime dependency versions.
 
 ### Validation
 
-- source repository files match recorded hashes or manifest clearly records changed hashes;
+- source repository files exist at the recorded paths;
 - runtime probe succeeds before long fit starts;
-- frozen input hashes match the original manifests;
+- frozen inputs exist and match the expected filenames;
 - final prototype mesh is finite and non-empty;
 - final polygon state has:
   - plane equations;
@@ -347,7 +347,7 @@ Aligned with paper:
 Implementation choices or not fully paper-specified:
 
 - exact unofficial optimizer implementation;
-- source hash pinning;
+- source file path recording;
 - zero-probability `door` channel for optimizer compatibility;
 - object mesh simplification target;
 - exact checkpoint file format;

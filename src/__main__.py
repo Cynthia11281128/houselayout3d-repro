@@ -1,7 +1,10 @@
 def main() -> int:
     print("Run component scripts directly:")
     print("  python src/rgb_to_mesh/colmap.py CONFIG --run-id RUN_ID")
-    print("  python src/rgb_to_mesh/metric3d.py --images IMAGES --output OUTPUT")
+    print(
+        "  python src/rgb_to_mesh/metric3d.py --images IMAGES "
+        "--transforms TRANSFORMS --output OUTPUT"
+    )
     print(
         "  python src/rgb_to_mesh/dn_splatter.py --output OUTPUT "
         "--transforms TRANSFORMS --images IMAGES --depth DEPTH"
@@ -12,7 +15,7 @@ def main() -> int:
     )
     print(
         "  python src/layout_skeleton/oneformer.py --images IMAGES "
-        "--model-dir MODEL_DIR --output OUTPUT"
+        "--transforms TRANSFORMS --model-dir MODEL_DIR --output OUTPUT"
     )
     print(
         "  python src/layout_skeleton/skeleton.py --transforms TRANSFORMS "

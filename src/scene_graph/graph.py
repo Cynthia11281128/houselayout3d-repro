@@ -10,7 +10,6 @@ if __package__ in {None, ""}:
     __package__ = "src.scene_graph"
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -82,14 +81,6 @@ class Grid2D:
         return np.column_stack((x, y))
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -99,7 +90,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _record(path: Path) -> dict[str, Any]:
-    return {"path": str(path), "sha256": _sha256(path), "size_bytes": path.stat().st_size}
+    return {"path": str(path), "size_bytes": path.stat().st_size}
 
 
 def _write_status(component_dir: Path, state: str, detail: str = "") -> None:
