@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .meshes import write_ceiling_candidate_ply
+
 
 class SceneGraphError(RuntimeError):
     """Raised when scene graph construction fails."""
@@ -54,6 +56,7 @@ class PrototypeData:
     triangles: Any
     triangle_polygons: Any
     polygon_classes: Any
+    plane_eqs: Any
     class_names: tuple[str, ...]
 
 
@@ -147,6 +150,22 @@ def _ensure_unofficial_import_path() -> None:
                 sys.path.insert(0, text)
 
 
+def _fit_plane(points: Any) -> Any:
+    import numpy as np
+
+    points = np.asarray(points, dtype=np.float64)
+    center = points.mean(axis=0)
+    _, _, right = np.linalg.svd(points - center, full_matrices=False)
+    normal = right[-1]
+    length = float(np.linalg.norm(normal))
+    if length <= 1.0e-12:
+        return np.asarray([0.0, 0.0, 1.0, -float(center[2])], dtype=np.float64)
+    normal /= length
+    if normal[2] < 0:
+        normal = -normal
+    return np.concatenate((normal, [-float(normal @ center)]))
+
+
 def load_prototype_data(state_path: Path) -> PrototypeData:
     import numpy as np
     import torch
@@ -159,17 +178,36 @@ def load_prototype_data(state_path: Path) -> PrototypeData:
     missing = [key for key in required if key not in state]
     if missing:
         raise SceneGraphError(f"prototype state is missing keys: {missing}")
+    vertices = state["vertices.vertices"].detach().cpu().numpy().astype(np.float64)
+    triangles = state["triangles"].detach().cpu().numpy().astype(np.int64)
+    triangle_polygons = state["triangle_polygons"].detach().cpu().numpy().astype(np.int64)
+    polygon_classes = state["polygon_classes"].detach().cpu().numpy().astype(np.int64)
+    if "vertices.planes" in state:
+        plane_eqs = state["vertices.planes"].detach().cpu().numpy().astype(np.float64)
+    else:
+        plane_eqs = np.zeros((len(polygon_classes), 4), dtype=np.float64)
+        for polygon_id in range(len(polygon_classes)):
+            polygon_triangles = triangles[triangle_polygons == polygon_id]
+            if len(polygon_triangles) == 0:
+                plane_eqs[polygon_id] = np.asarray([0.0, 0.0, 1.0, 0.0])
+                continue
+            plane_eqs[polygon_id] = _fit_plane(vertices[np.unique(polygon_triangles)])
     data = PrototypeData(
-        vertices=state["vertices.vertices"].detach().cpu().numpy().astype(np.float64),
-        triangles=state["triangles"].detach().cpu().numpy().astype(np.int64),
-        triangle_polygons=state["triangle_polygons"].detach().cpu().numpy().astype(np.int64),
-        polygon_classes=state["polygon_classes"].detach().cpu().numpy().astype(np.int64),
+        vertices=vertices,
+        triangles=triangles,
+        triangle_polygons=triangle_polygons,
+        polygon_classes=polygon_classes,
+        plane_eqs=plane_eqs,
         class_names=_class_names_from_state(state.get("class_names")),
     )
     if len(data.vertices) == 0 or len(data.triangles) == 0 or len(data.polygon_classes) == 0:
         raise SceneGraphError("prototype geometry is empty")
     if not np.isfinite(data.vertices).all():
         raise SceneGraphError("prototype vertices contain non-finite values")
+    if data.plane_eqs.shape != (len(data.polygon_classes), 4):
+        raise SceneGraphError(f"prototype plane equations have invalid shape: {data.plane_eqs.shape}")
+    if not np.isfinite(data.plane_eqs).all():
+        raise SceneGraphError("prototype plane equations contain non-finite values")
     return data
 
 
@@ -220,6 +258,38 @@ def weighted_elevation(polygon_ids: Sequence[int], elevations: Mapping[int, floa
     weights = np.asarray([max(float(geometries[value].area), 1.0e-6) for value in polygon_ids], dtype=np.float64)
     values = np.asarray([elevations[value] for value in polygon_ids], dtype=np.float64)
     return float(np.average(values, weights=weights))
+
+
+def ceiling_candidate_records(
+    data: PrototypeData,
+    polygon_ids: Sequence[int],
+    geometries: Mapping[int, Any],
+    elevations: Mapping[int, float],
+    level_id: str,
+) -> list[dict[str, Any]]:
+    from shapely.geometry import mapping
+
+    records = []
+    for polygon_id in polygon_ids:
+        geometry = geometries[int(polygon_id)]
+        if geometry.is_empty or geometry.area <= 1.0e-10:
+            continue
+        plane = data.plane_eqs[int(polygon_id)].astype(float)
+        normal_length = float((plane[:3] ** 2).sum() ** 0.5)
+        if normal_length <= 1.0e-12:
+            continue
+        plane = plane / normal_length
+        records.append(
+            {
+                "polygon_id": int(polygon_id),
+                "level_id": level_id,
+                "plane_eq": plane.tolist(),
+                "mean_elevation_meters": float(elevations[int(polygon_id)]),
+                "area_square_meters": float(geometry.area),
+                "geometry": mapping(geometry),
+            }
+        )
+    return records
 
 
 def build_grid(geometry: Any, resolution: float, padding: int = 10) -> Grid2D:
@@ -626,6 +696,10 @@ def run_scene_graph(
             if assigned_ceilings
             else floor_height + config.wall_interval_height_meters
         )
+        
+        ceiling_candidates = ceiling_candidate_records(data, assigned_ceilings, 
+                                                       geometries, elevations, "level_0")
+        
         selected_walls = []
         for polygon_id in wall_ids:
             minimum_z, maximum_z = polygon_height_interval(data, polygon_id)
@@ -690,6 +764,7 @@ def run_scene_graph(
             "elevation_meters": floor_height,
             "ceiling_elevation_meters": ceiling_height,
             "floorplan_ref": "floorplan.geojson",
+            "ceiling_candidates_ref": "ceiling_candidates.json",
             "floor_polygon_ids": floor_ids,
             "ceiling_polygon_ids": assigned_ceilings,
             "wall_polygon_ids": selected_walls,
@@ -713,6 +788,8 @@ def run_scene_graph(
         rooms_path = output / "rooms.geojson"
         openings_path = output / "openings.geojson"
         graph_path = output / "graph.json"
+        ceiling_candidates_path = output / "ceiling_candidates.json"
+        ceiling_candidates_mesh_path = output / "ceiling_candidates.ply"
         windows_path = output / "windows.json"
         stairs_path = output / "stairs.json"
         diagnostics_path = output / "diagnostics.json"
@@ -736,6 +813,14 @@ def run_scene_graph(
             ),
         )
         _write_json(graph_path, graph)
+        _write_json(ceiling_candidates_path, ceiling_candidates)
+        ceiling_candidate_mesh_counts = write_ceiling_candidate_ply(
+            ceiling_candidates_mesh_path,
+            data.vertices,
+            data.triangles,
+            data.triangle_polygons,
+            assigned_ceilings,
+        )
         _write_json(windows_path, windows)
         _write_json(stairs_path, stair_regions)
         _write_json(
@@ -750,6 +835,7 @@ def run_scene_graph(
                 "stair_detection": stair_diagnostics,
                 "window_detection": window_diagnostics,
                 "floor_height_clusters": floor_height_clusters,
+                "ceiling_candidate_count": len(ceiling_candidates),
             },
         )
         np.savez_compressed(
@@ -770,6 +856,7 @@ def run_scene_graph(
             "all_room_geometries_nonempty": all(not geometry.is_empty for geometry in room_geometries.values()),
             "edge_room_references_valid": all(all(room_id in room_geometries for room_id in edge["room_ids"]) for edge in edges),
             "windows_reference_known_rooms_when_present": all(all(room_id in room_geometries for room_id in window.get("room_ids", [])) for window in windows),
+            "ceiling_candidates_reference_known_polygons": all(int(candidate["polygon_id"]) in assigned_ceilings for candidate in ceiling_candidates),
             "no_ground_truth_inputs_used": True,
         }
         if not all(validation.values()):
@@ -803,10 +890,25 @@ def run_scene_graph(
                 "windows": len(windows),
                 "floor_polygons": len(floor_ids),
                 "ceiling_polygons": len(assigned_ceilings),
+                "ceiling_candidates": len(ceiling_candidates),
+                **(
+                    {
+                        "ceiling_candidate_mesh_vertices": ceiling_candidate_mesh_counts["vertices"],
+                        "ceiling_candidate_mesh_triangles": ceiling_candidate_mesh_counts["triangles"],
+                    }
+                    if ceiling_candidate_mesh_counts is not None
+                    else {}
+                ),
                 "wall_polygons": len(selected_walls),
             },
             "outputs": {
                 "graph": _record(graph_path),
+                "ceiling_candidates": _record(ceiling_candidates_path),
+                **(
+                    {"ceiling_candidates_mesh": _record(ceiling_candidates_mesh_path)}
+                    if ceiling_candidate_mesh_counts is not None
+                    else {}
+                ),
                 "floorplan": _record(floorplan_path),
                 "rooms": _record(rooms_path),
                 "openings": _record(openings_path),
