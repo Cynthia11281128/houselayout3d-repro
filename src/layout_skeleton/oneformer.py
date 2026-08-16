@@ -90,38 +90,6 @@ def load_camera(path: Path) -> CameraConfig:
     return camera
 
 
-def _resolve_manifest_artifact(manifest_path: Path, path_text: str) -> Path:
-    path = Path(path_text)
-    if path.is_file():
-        return path
-    # Downloaded manifests may contain source-server absolute paths. Preserve the
-    # component-local suffix when possible.
-    parts = path.parts
-    if "mesh" in parts:
-        suffix = Path(*parts[parts.index("mesh") + 1 :])
-        candidate = manifest_path.parent / suffix
-        if candidate.is_file():
-            return candidate
-    if not path.is_absolute():
-        candidate = manifest_path.parent / path
-        if candidate.is_file():
-            return candidate
-    return path
-
-
-def _mesh_record(mesh_manifest_path: Path) -> dict[str, Any]:
-    manifest = _read_json(mesh_manifest_path)
-    if manifest.get("status") != "complete":
-        raise OneFormerError("mesh manifest is not complete")
-    record = manifest["outputs"]["poisson_mesh"]
-    path = _resolve_manifest_artifact(mesh_manifest_path, record["path"])
-    if not path.is_file() or _sha256(path) != record["sha256"]:
-        raise OneFormerError(f"mesh Poisson artifact hash mismatch: {path}")
-    resolved = dict(record)
-    resolved["path"] = str(path)
-    return resolved
-
-
 def _verify_model_files(model_dir: Path) -> dict[str, dict[str, Any]]:
     required = (
         "config.json",
@@ -189,7 +157,6 @@ def run_oneformer(
     output_dir: Path,
     camera: CameraConfig,
     model_dir: Path,
-    mesh_manifest: Path | None = None,
     image_list: Path | None = None,
     task: str = "semantic",
     preview_count: int = 12,
@@ -201,11 +168,9 @@ def run_oneformer(
     images = images.expanduser().resolve()
     output_dir = output_dir.expanduser()
     model_dir = model_dir.expanduser().resolve()
-    mesh_manifest = mesh_manifest.expanduser().resolve() if mesh_manifest is not None else None
     if output_dir.exists():
         raise OneFormerError(f"OneFormer output already exists: {output_dir}")
     records = _scan_images(images, image_list.expanduser().resolve() if image_list else None)
-    mesh = _mesh_record(mesh_manifest) if mesh_manifest is not None else None
     model_files = _verify_model_files(model_dir)
 
     coco_dir = output_dir / "coco_id"
@@ -390,9 +355,6 @@ def run_oneformer(
             },
             "warnings": [],
         }
-        if mesh_manifest is not None:
-            manifest["inputs"]["mesh_manifest"] = {"path": str(mesh_manifest), "sha256": _sha256(mesh_manifest)}
-            manifest["inputs"]["poisson_mesh"] = mesh
         manifest_path = output_dir / "manifest.json"
         _write_json(manifest_path, manifest)
         _write_status(output_dir, "complete", str(manifest_path))
@@ -411,7 +373,6 @@ def main() -> int:
     )
     parser.add_argument("--images", type=Path, required=True)
     parser.add_argument("--image-list", type=Path)
-    parser.add_argument("--mesh-manifest", type=Path)
     parser.add_argument("--camera", type=Path, default=Path("camera_param.json"))
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -424,7 +385,6 @@ def main() -> int:
         output_dir=args.output,
         camera=load_camera(args.camera),
         model_dir=args.model_dir,
-        mesh_manifest=args.mesh_manifest,
         image_list=args.image_list,
         task=args.task,
         preview_count=args.preview_count,

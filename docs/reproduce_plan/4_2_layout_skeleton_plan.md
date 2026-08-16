@@ -70,7 +70,7 @@ Keep Section 4.1 code under `src/rgb_to_mesh/`. Do not place 4.2 code in `rgb_to
 Update `src/__main__.py` to advertise the new scripts:
 
 ```text
-python src/layout_skeleton/oneformer.py --images IMAGES --mesh-manifest MESH_MANIFEST --output OUTPUT
+python src/layout_skeleton/oneformer.py --images IMAGES --model-dir MODEL_DIR --output OUTPUT
 python src/layout_skeleton/skeleton.py --transforms TRANSFORMS --dn-splatter DN_SPLATTER --mesh MESH --oneformer ONEFORMER --output OUTPUT
 ```
 
@@ -100,7 +100,6 @@ Inputs:
 - image directory;
 - optional image list, defaulting to sorted supported images;
 - camera width/height validation, either from `camera_param.json` or explicit CLI args;
-- completed mesh manifest for provenance;
 - local OneFormer model directory;
 - output directory;
 - random seed;
@@ -136,7 +135,7 @@ Implement `src/layout_skeleton/skeleton.py` by migrating the backup logic with e
 Inputs:
 
 - completed DN-Splatter manifest or training config/checkpoint pair;
-- completed mesh manifest or direct Poisson mesh path;
+- direct Poisson mesh path;
 - completed OneFormer manifest;
 - Nerfstudio `transforms.json`;
 - camera intrinsics;
@@ -216,7 +215,6 @@ OneFormer example:
 ```bash
 python src/layout_skeleton/oneformer.py \
   --images data/insta360/r04/images \
-  --mesh-manifest data/insta360/r04/mesh/manifest.json \
   --camera camera_param.json \
   --model-dir pretrained_weights/oneformer_coco_swin_large \
   --output data/insta360/r04/oneformer
@@ -226,9 +224,9 @@ Skeleton example:
 
 ```bash
 python src/layout_skeleton/skeleton.py \
-  --transforms data/insta360/r04/dn_splatter/transforms.json \
+  --transforms data/insta360/r04/transforms.json \
   --dn-splatter data/insta360/r04/dn_splatter \
-  --mesh-manifest data/insta360/r04/mesh/manifest.json \
+  --mesh data/insta360/r04/mesh/export/DepthAndNormalMapsPoisson_poisson_mesh.ply \
   --oneformer data/insta360/r04/oneformer \
   --camera camera_param.json \
   --ns-render /path/to/ns-render \
